@@ -8,34 +8,58 @@ branding:
 
 inputs:
   version:
-    description: Appaloft CLI version to install. Use latest to follow the npm latest dist-tag.
+    description: Appaloft CLI version to install. Use latest to install the latest GitHub Release.
     required: false
     default: latest
   config:
-    description: Path to the Appaloft deployment config file.
+    description: Path to appaloft.yml. The default is used only when the file exists.
     required: false
     default: appaloft.yml
-  path-or-source:
+  source:
     description: Local path, git source, image source, or remote source to deploy.
     required: false
     default: "."
   method:
     description: Deployment method override.
     required: false
+  ssh-host:
+    description: SSH server host for remote Appaloft state and deployment execution.
+    required: false
+  ssh-user:
+    description: SSH username for the target server.
+    required: false
+  ssh-port:
+    description: SSH server port. The CLI defaults to 22 when omitted.
+    required: false
+  ssh-private-key:
+    description: SSH private key material from a GitHub secret.
+    required: false
+  ssh-private-key-file:
+    description: Path to an SSH private key file already present on the runner.
+    required: false
+  server-proxy-kind:
+    description: Edge proxy kind for the target server, for example traefik, caddy, or none.
+    required: false
+  state-backend:
+    description: Appaloft state backend. Defaults to ssh-pglite when ssh-host is provided.
+    required: false
+  args:
+    description: Additional Appaloft CLI arguments appended after translated inputs.
+    required: false
   project-id:
-    description: Existing Appaloft project id for stateful/control-plane deployments.
+    description: Advanced trusted project id override for hosted or self-hosted control-plane deployments.
     required: false
   server-id:
-    description: Existing Appaloft server id for stateful/control-plane deployments.
+    description: Advanced trusted server id override for hosted or self-hosted control-plane deployments.
     required: false
   destination-id:
-    description: Existing Appaloft destination id.
+    description: Advanced trusted destination id override.
     required: false
   environment-id:
-    description: Existing Appaloft environment id for stateful/control-plane deployments.
+    description: Advanced trusted environment id override for hosted or self-hosted control-plane deployments.
     required: false
   resource-id:
-    description: Existing Appaloft resource id for stateful/control-plane deployments.
+    description: Advanced trusted resource id override for hosted or self-hosted control-plane deployments.
     required: false
   resource-name:
     description: Resource name to create or reuse when resource-id is not supplied.
@@ -45,33 +69,6 @@ inputs:
     required: false
   resource-description:
     description: Resource description to create when resource-id is not supplied.
-    required: false
-  target-host:
-    description: SSH server host for first-run remote target bootstrap.
-    required: false
-  target-name:
-    description: SSH server name for first-run remote target bootstrap.
-    required: false
-  target-provider:
-    description: Server provider key. Defaults to generic-ssh when target-host is provided.
-    required: false
-  target-port:
-    description: SSH server port. The CLI defaults to 22 when omitted.
-    required: false
-  target-proxy-kind:
-    description: Edge proxy kind for a created server, for example traefik, caddy, or none.
-    required: false
-  target-ssh-username:
-    description: SSH username for the target server.
-    required: false
-  target-ssh-public-key:
-    description: Public key metadata for the SSH credential.
-    required: false
-  target-private-key:
-    description: SSH private key material from a GitHub secret.
-    required: false
-  target-private-key-file:
-    description: Path to an SSH private key file already present on the runner.
     required: false
   install:
     description: Install command override.
@@ -95,34 +92,74 @@ inputs:
     description: Number of application log lines to print after deployment.
     required: false
     default: "3"
+  path-or-source:
+    description: Legacy alias for source.
+    required: false
+  target-host:
+    description: Legacy alias for ssh-host.
+    required: false
+  target-port:
+    description: Legacy alias for ssh-port.
+    required: false
+  target-proxy-kind:
+    description: Legacy alias for server-proxy-kind.
+    required: false
+  target-ssh-username:
+    description: Legacy alias for ssh-user.
+    required: false
+  target-private-key:
+    description: Legacy alias for ssh-private-key.
+    required: false
+  target-private-key-file:
+    description: Legacy alias for ssh-private-key-file.
+    required: false
+  target-name:
+    description: Legacy server name input.
+    required: false
+  target-provider:
+    description: Legacy server provider input.
+    required: false
+  target-ssh-public-key:
+    description: Legacy SSH public key metadata input.
+    required: false
+
+outputs:
+  appaloft-version:
+    description: Installed Appaloft CLI release tag.
+    value: ${{ steps.install.outputs.appaloft-version }}
+  appaloft-target:
+    description: Installed Appaloft CLI release target.
+    value: ${{ steps.install.outputs.appaloft-target }}
+  appaloft-bin-dir:
+    description: Directory added to PATH for the installed Appaloft CLI.
+    value: ${{ steps.install.outputs.appaloft-bin-dir }}
 
 runs:
   using: composite
   steps:
-    - name: Set up Appaloft
-      uses: appaloft/setup-appaloft@v1
-      with:
-        version: ${{ inputs.version }}
-
-    - name: Materialize target SSH private key
-      id: target-key
-      if: ${{ inputs.target-private-key != '' }}
+    - name: Install Appaloft CLI
+      id: install
       shell: bash
-      run: |
-        key_path="${RUNNER_TEMP}/appaloft-target-ssh-key"
-        umask 077
-        printf '%s\n' "$INPUT_TARGET_PRIVATE_KEY" >"$key_path"
-        echo "path=${key_path}" >>"$GITHUB_OUTPUT"
+      run: '"$GITHUB_ACTION_PATH/scripts/install-appaloft.sh" "$INPUT_VERSION"'
       env:
-        INPUT_TARGET_PRIVATE_KEY: ${{ inputs.target-private-key }}
+        INPUT_VERSION: ${{ inputs.version }}
 
     - name: Deploy
       shell: bash
-      run: "$GITHUB_ACTION_PATH/deploy.sh"
+      run: '"$GITHUB_ACTION_PATH/scripts/run-deploy.sh"'
       env:
         INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_SOURCE: ${{ inputs.source }}
         INPUT_PATH_OR_SOURCE: ${{ inputs.path-or-source }}
         INPUT_METHOD: ${{ inputs.method }}
+        INPUT_SSH_HOST: ${{ inputs.ssh-host }}
+        INPUT_SSH_USER: ${{ inputs.ssh-user }}
+        INPUT_SSH_PORT: ${{ inputs.ssh-port }}
+        INPUT_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+        INPUT_SSH_PRIVATE_KEY_FILE: ${{ inputs.ssh-private-key-file }}
+        INPUT_SERVER_PROXY_KIND: ${{ inputs.server-proxy-kind }}
+        INPUT_STATE_BACKEND: ${{ inputs.state-backend }}
+        INPUT_ARGS: ${{ inputs.args }}
         INPUT_PROJECT_ID: ${{ inputs.project-id }}
         INPUT_SERVER_ID: ${{ inputs.server-id }}
         INPUT_DESTINATION_ID: ${{ inputs.destination-id }}
@@ -131,15 +168,6 @@ runs:
         INPUT_RESOURCE_NAME: ${{ inputs.resource-name }}
         INPUT_RESOURCE_KIND: ${{ inputs.resource-kind }}
         INPUT_RESOURCE_DESCRIPTION: ${{ inputs.resource-description }}
-        INPUT_TARGET_HOST: ${{ inputs.target-host }}
-        INPUT_TARGET_NAME: ${{ inputs.target-name }}
-        INPUT_TARGET_PROVIDER: ${{ inputs.target-provider }}
-        INPUT_TARGET_PORT: ${{ inputs.target-port }}
-        INPUT_TARGET_PROXY_KIND: ${{ inputs.target-proxy-kind }}
-        INPUT_TARGET_SSH_USERNAME: ${{ inputs.target-ssh-username }}
-        INPUT_TARGET_SSH_PUBLIC_KEY: ${{ inputs.target-ssh-public-key }}
-        INPUT_TARGET_PRIVATE_KEY_FILE: ${{ inputs.target-private-key-file }}
-        MATERIALIZED_TARGET_PRIVATE_KEY_FILE: ${{ steps.target-key.outputs.path }}
         INPUT_INSTALL: ${{ inputs.install }}
         INPUT_BUILD: ${{ inputs.build }}
         INPUT_START: ${{ inputs.start }}
@@ -147,3 +175,12 @@ runs:
         INPUT_PORT: ${{ inputs.port }}
         INPUT_HEALTH_PATH: ${{ inputs.health-path }}
         INPUT_APP_LOG_LINES: ${{ inputs.app-log-lines }}
+        INPUT_TARGET_HOST: ${{ inputs.target-host }}
+        INPUT_TARGET_PORT: ${{ inputs.target-port }}
+        INPUT_TARGET_PROXY_KIND: ${{ inputs.target-proxy-kind }}
+        INPUT_TARGET_SSH_USERNAME: ${{ inputs.target-ssh-username }}
+        INPUT_TARGET_PRIVATE_KEY: ${{ inputs.target-private-key }}
+        INPUT_TARGET_PRIVATE_KEY_FILE: ${{ inputs.target-private-key-file }}
+        INPUT_TARGET_NAME: ${{ inputs.target-name }}
+        INPUT_TARGET_PROVIDER: ${{ inputs.target-provider }}
+        INPUT_TARGET_SSH_PUBLIC_KEY: ${{ inputs.target-ssh-public-key }}
