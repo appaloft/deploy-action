@@ -129,3 +129,7 @@ Legacy `target-*` and `path-or-source` inputs remain accepted as aliases for old
 This repo is released only when the GitHub Actions wrapper changes. CLI changes ship from the main
 Appaloft repo as GitHub Release assets. Workflows using `version: latest` pick up the newest CLI
 release without requiring a deploy-action repo release.
+
+## License
+
+Apache-2.0.
