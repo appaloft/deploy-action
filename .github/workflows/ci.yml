@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate wrapper scripts
+        run: bash -n scripts/install-appaloft.sh scripts/run-deploy.sh
+
+      - name: Validate dry-run preview mapping
+        env:
+          APPALOFT_BIN: /opt/appaloft/appaloft
+          APPALOFT_DEPLOY_ACTION_DRY_RUN: "true"
+          INPUT_CONFIG: appaloft.preview.yml
+          INPUT_SOURCE: "."
+          INPUT_SSH_HOST: 203.0.113.10
+          INPUT_PREVIEW: pull-request
+          INPUT_PREVIEW_ID: pr-1
+          INPUT_PREVIEW_DOMAIN_TEMPLATE: pr-1.preview.example.com
+          INPUT_PREVIEW_TLS_MODE: disabled
+          INPUT_REQUIRE_PREVIEW_URL: "true"
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          export RUNNER_TEMP="$tmp"
+          export GITHUB_OUTPUT="$tmp/github-output"
+          export APPALOFT_DEPLOY_ACTION_ARGV_PATH="$tmp/argv"
+
+          bash scripts/run-deploy.sh
+
+          grep -q -- "--preview-output-file" "$tmp/argv"
+          grep -q '^preview-id=pr-1$' "$tmp/github-output"
+          grep -q '^preview-url=http://pr-1.preview.example.com$' "$tmp/github-output"
+
+      - name: Opt-in exact-version install smoke
+        if: ${{ vars.APPALOFT_INSTALL_SMOKE_VERSION != '' }}
+        env:
+          INPUT_VERSION: ${{ vars.APPALOFT_INSTALL_SMOKE_VERSION }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          export RUNNER_TEMP="$tmp"
+          export GITHUB_OUTPUT="$tmp/github-output"
+
+          bash scripts/install-appaloft.sh
+
+          appaloft_bin="$(sed -n 's/^appaloft-bin=//p' "$tmp/github-output" | head -n 1)"
+          test -n "$appaloft_bin"
+          test -x "$appaloft_bin"

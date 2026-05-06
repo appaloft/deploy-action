@@ -1,186 +1,143 @@
-name: Deploy With Appaloft
-description: Deploy a repository with the Appaloft CLI from GitHub Actions.
-author: Appaloft
-
-branding:
-  icon: upload-cloud
-  color: blue
+name: Appaloft Deploy
+description: Install the Appaloft CLI and run the repository deployment workflow.
 
 inputs:
+  command:
+    description: Wrapper command to run. Use deploy for deployments or preview-cleanup for pull request cleanup.
+    required: false
+    default: deploy
   version:
-    description: Appaloft CLI version to install. Use latest to install the latest GitHub Release.
+    description: Appaloft CLI release tag, for example v0.9.0. Use latest for the latest stable release.
     required: false
     default: latest
   config:
-    description: Path to appaloft.yml. The default is used only when the file exists.
+    description: Optional Appaloft config path. When omitted, appaloft.yml is used only if it exists.
     required: false
-    default: appaloft.yml
+    default: ""
   source:
-    description: Local path, git source, image source, or remote source to deploy.
+    description: Source path or locator passed to appaloft deploy.
     required: false
     default: "."
-  method:
-    description: Deployment method override.
+  runtime-name:
+    description: Trusted runtime name override.
     required: false
+    default: ""
   ssh-host:
-    description: SSH server host for remote Appaloft state and deployment execution.
+    description: SSH target host for pure SSH deployments.
     required: false
+    default: ""
   ssh-user:
-    description: SSH username for the target server.
+    description: SSH username.
     required: false
+    default: ""
   ssh-port:
-    description: SSH server port. The CLI defaults to 22 when omitted.
+    description: SSH port.
     required: false
+    default: ""
   ssh-private-key:
-    description: SSH private key material from a GitHub secret.
+    description: SSH private key value. Written to a runner temp file before invoking Appaloft.
     required: false
+    default: ""
   ssh-private-key-file:
-    description: Path to an SSH private key file already present on the runner.
+    description: Existing runner-local SSH private key file.
     required: false
+    default: ""
+  server-provider:
+    description: Server provider key.
+    required: false
+    default: "generic-ssh"
   server-proxy-kind:
-    description: Edge proxy kind for the target server, for example traefik, caddy, or none.
+    description: Server proxy kind.
     required: false
+    default: ""
   state-backend:
-    description: Appaloft state backend. Defaults to ssh-pglite when ssh-host is provided.
+    description: Appaloft state backend. Defaults to ssh-pglite when ssh-host is supplied.
     required: false
-  args:
-    description: Additional Appaloft CLI arguments appended after translated inputs.
+    default: ""
+  preview:
+    description: Preview mode. The first accepted value is pull-request.
     required: false
-  project-id:
-    description: Advanced trusted project id override for hosted or self-hosted control-plane deployments.
+    default: ""
+  preview-id:
+    description: Trusted preview scope, for example pr-123.
     required: false
-  server-id:
-    description: Advanced trusted server id override for hosted or self-hosted control-plane deployments.
+    default: ""
+  preview-domain-template:
+    description: Trusted preview hostname template rendered by the workflow or action.
     required: false
-  destination-id:
-    description: Advanced trusted destination id override.
+    default: ""
+  preview-tls-mode:
+    description: Preview TLS mode for preview-domain-template.
     required: false
-  environment-id:
-    description: Advanced trusted environment id override for hosted or self-hosted control-plane deployments.
+    default: ""
+  require-preview-url:
+    description: Fail when no public preview URL is resolved.
     required: false
-  resource-id:
-    description: Advanced trusted resource id override for hosted or self-hosted control-plane deployments.
+    default: "false"
+  control-plane-mode:
+    description: Future control-plane mode. Only none is accepted by this wrapper baseline.
     required: false
-  resource-name:
-    description: Resource name to create or reuse when resource-id is not supplied.
+    default: "none"
+  control-plane-url:
+    description: Future control-plane endpoint.
     required: false
-  resource-kind:
-    description: Resource kind to create when resource-id is not supplied.
+    default: ""
+  appaloft-token:
+    description: Future control-plane token.
     required: false
-  resource-description:
-    description: Resource description to create when resource-id is not supplied.
+    default: ""
+  use-oidc:
+    description: Future GitHub OIDC exchange toggle.
     required: false
-  install:
-    description: Install command override.
-    required: false
-  build:
-    description: Build command override.
-    required: false
-  start:
-    description: Start command override.
-    required: false
-  publish-dir:
-    description: Static publish directory override.
-    required: false
-  port:
-    description: Application port override.
-    required: false
-  health-path:
-    description: Health check path override.
-    required: false
-  app-log-lines:
-    description: Number of application log lines to print after deployment.
-    required: false
-    default: "3"
-  path-or-source:
-    description: Legacy alias for source.
-    required: false
-  target-host:
-    description: Legacy alias for ssh-host.
-    required: false
-  target-port:
-    description: Legacy alias for ssh-port.
-    required: false
-  target-proxy-kind:
-    description: Legacy alias for server-proxy-kind.
-    required: false
-  target-ssh-username:
-    description: Legacy alias for ssh-user.
-    required: false
-  target-private-key:
-    description: Legacy alias for ssh-private-key.
-    required: false
-  target-private-key-file:
-    description: Legacy alias for ssh-private-key-file.
-    required: false
-  target-name:
-    description: Legacy server name input.
-    required: false
-  target-provider:
-    description: Legacy server provider input.
-    required: false
-  target-ssh-public-key:
-    description: Legacy SSH public key metadata input.
-    required: false
+    default: "false"
 
 outputs:
   appaloft-version:
-    description: Installed Appaloft CLI release tag.
+    description: Installed Appaloft CLI version.
     value: ${{ steps.install.outputs.appaloft-version }}
   appaloft-target:
-    description: Installed Appaloft CLI release target.
+    description: Installed Appaloft release target.
     value: ${{ steps.install.outputs.appaloft-target }}
-  appaloft-bin-dir:
-    description: Directory added to PATH for the installed Appaloft CLI.
-    value: ${{ steps.install.outputs.appaloft-bin-dir }}
+  preview-id:
+    description: Preview id when preview mode is selected.
+    value: ${{ steps.deploy.outputs.preview-id }}
+  preview-url:
+    description: Preview URL resolved by the CLI from generated/default access or custom preview route intent.
+    value: ${{ steps.deploy.outputs.preview-url }}
 
 runs:
   using: composite
   steps:
-    - name: Install Appaloft CLI
-      id: install
+    - id: install
       shell: bash
-      run: '"$GITHUB_ACTION_PATH/scripts/install-appaloft.sh" "$INPUT_VERSION"'
       env:
         INPUT_VERSION: ${{ inputs.version }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: $GITHUB_ACTION_PATH/scripts/install-appaloft.sh
 
-    - name: Deploy
+    - id: deploy
       shell: bash
-      run: '"$GITHUB_ACTION_PATH/scripts/run-deploy.sh"'
       env:
+        APPALOFT_BIN: ${{ steps.install.outputs.appaloft-bin }}
+        INPUT_COMMAND: ${{ inputs.command }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_SOURCE: ${{ inputs.source }}
-        INPUT_PATH_OR_SOURCE: ${{ inputs.path-or-source }}
-        INPUT_METHOD: ${{ inputs.method }}
+        INPUT_RUNTIME_NAME: ${{ inputs.runtime-name }}
         INPUT_SSH_HOST: ${{ inputs.ssh-host }}
         INPUT_SSH_USER: ${{ inputs.ssh-user }}
         INPUT_SSH_PORT: ${{ inputs.ssh-port }}
         INPUT_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
         INPUT_SSH_PRIVATE_KEY_FILE: ${{ inputs.ssh-private-key-file }}
+        INPUT_SERVER_PROVIDER: ${{ inputs.server-provider }}
         INPUT_SERVER_PROXY_KIND: ${{ inputs.server-proxy-kind }}
         INPUT_STATE_BACKEND: ${{ inputs.state-backend }}
-        INPUT_ARGS: ${{ inputs.args }}
-        INPUT_PROJECT_ID: ${{ inputs.project-id }}
-        INPUT_SERVER_ID: ${{ inputs.server-id }}
-        INPUT_DESTINATION_ID: ${{ inputs.destination-id }}
-        INPUT_ENVIRONMENT_ID: ${{ inputs.environment-id }}
-        INPUT_RESOURCE_ID: ${{ inputs.resource-id }}
-        INPUT_RESOURCE_NAME: ${{ inputs.resource-name }}
-        INPUT_RESOURCE_KIND: ${{ inputs.resource-kind }}
-        INPUT_RESOURCE_DESCRIPTION: ${{ inputs.resource-description }}
-        INPUT_INSTALL: ${{ inputs.install }}
-        INPUT_BUILD: ${{ inputs.build }}
-        INPUT_START: ${{ inputs.start }}
-        INPUT_PUBLISH_DIR: ${{ inputs.publish-dir }}
-        INPUT_PORT: ${{ inputs.port }}
-        INPUT_HEALTH_PATH: ${{ inputs.health-path }}
-        INPUT_APP_LOG_LINES: ${{ inputs.app-log-lines }}
-        INPUT_TARGET_HOST: ${{ inputs.target-host }}
-        INPUT_TARGET_PORT: ${{ inputs.target-port }}
-        INPUT_TARGET_PROXY_KIND: ${{ inputs.target-proxy-kind }}
-        INPUT_TARGET_SSH_USERNAME: ${{ inputs.target-ssh-username }}
-        INPUT_TARGET_PRIVATE_KEY: ${{ inputs.target-private-key }}
-        INPUT_TARGET_PRIVATE_KEY_FILE: ${{ inputs.target-private-key-file }}
-        INPUT_TARGET_NAME: ${{ inputs.target-name }}
-        INPUT_TARGET_PROVIDER: ${{ inputs.target-provider }}
-        INPUT_TARGET_SSH_PUBLIC_KEY: ${{ inputs.target-ssh-public-key }}
+        INPUT_PREVIEW: ${{ inputs.preview }}
+        INPUT_PREVIEW_ID: ${{ inputs.preview-id }}
+        INPUT_PREVIEW_DOMAIN_TEMPLATE: ${{ inputs.preview-domain-template }}
+        INPUT_PREVIEW_TLS_MODE: ${{ inputs.preview-tls-mode }}
+        INPUT_REQUIRE_PREVIEW_URL: ${{ inputs.require-preview-url }}
+        INPUT_CONTROL_PLANE_MODE: ${{ inputs.control-plane-mode }}
+        INPUT_CONTROL_PLANE_URL: ${{ inputs.control-plane-url }}
+        INPUT_APPALOFT_TOKEN: ${{ inputs.appaloft-token }}
+        INPUT_USE_OIDC: ${{ inputs.use-oidc }}
+      run: $GITHUB_ACTION_PATH/scripts/run-deploy.sh

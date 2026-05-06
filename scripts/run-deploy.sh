@@ -1,128 +1,201 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-add_arg() {
-  local option="$1"
-  local value="${2:-}"
+error() {
+  echo "::error::$*" >&2
+}
 
-  if [[ -n "$value" ]]; then
-    args+=("$option" "$value")
+truthy() {
+  case "${1:-}" in
+    true|TRUE|True|1|yes|YES|Yes)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+append_arg() {
+  argv+=("$1")
+}
+
+append_option() {
+  local name="$1"
+  local value="$2"
+  if [ -n "$value" ]; then
+    argv+=("$name" "$value")
   fi
 }
 
-first_non_empty() {
-  local value
-
-  for value in "$@"; do
-    if [[ -n "$value" ]]; then
-      echo "$value"
-      return
-    fi
-  done
-}
-
-cleanup() {
-  if [[ -n "${materialized_ssh_private_key_file:-}" ]]; then
-    rm -f "$materialized_ssh_private_key_file"
+cleanup_key_file() {
+  if [ -n "${generated_key_file:-}" ]; then
+    rm -f "$generated_key_file"
+  fi
+  if [ -n "${generated_preview_output_file:-}" ]; then
+    rm -f "$generated_preview_output_file"
   fi
 }
-trap cleanup EXIT
 
-runner_temp="${RUNNER_TEMP:-/tmp}"
-source_value="$(first_non_empty "${INPUT_SOURCE:-}" "${INPUT_PATH_OR_SOURCE:-}" ".")"
-config_value="${INPUT_CONFIG:-appaloft.yml}"
+trap cleanup_key_file EXIT
 
-args=(deploy "$source_value")
-
-if [[ -n "$config_value" ]]; then
-  if [[ -f "$config_value" ]]; then
-    add_arg "--config" "$config_value"
-  elif [[ "$config_value" != "appaloft.yml" ]]; then
-    add_arg "--config" "$config_value"
-  fi
-fi
-
-add_arg "--method" "${INPUT_METHOD:-}"
-add_arg "--project" "${INPUT_PROJECT_ID:-}"
-add_arg "--server" "${INPUT_SERVER_ID:-}"
-add_arg "--destination" "${INPUT_DESTINATION_ID:-}"
-add_arg "--environment" "${INPUT_ENVIRONMENT_ID:-}"
-add_arg "--resource" "${INPUT_RESOURCE_ID:-}"
-add_arg "--resource-name" "${INPUT_RESOURCE_NAME:-}"
-add_arg "--resource-kind" "${INPUT_RESOURCE_KIND:-}"
-add_arg "--resource-description" "${INPUT_RESOURCE_DESCRIPTION:-}"
-add_arg "--install" "${INPUT_INSTALL:-}"
-add_arg "--build" "${INPUT_BUILD:-}"
-add_arg "--start" "${INPUT_START:-}"
-add_arg "--publish-dir" "${INPUT_PUBLISH_DIR:-}"
-add_arg "--port" "${INPUT_PORT:-}"
-add_arg "--health-path" "${INPUT_HEALTH_PATH:-}"
-add_arg "--app-log-lines" "${INPUT_APP_LOG_LINES:-3}"
-
-ssh_host="$(first_non_empty "${INPUT_SSH_HOST:-}" "${INPUT_TARGET_HOST:-}")"
-ssh_user="$(first_non_empty "${INPUT_SSH_USER:-}" "${INPUT_TARGET_SSH_USERNAME:-}")"
-ssh_port="$(first_non_empty "${INPUT_SSH_PORT:-}" "${INPUT_TARGET_PORT:-}")"
-ssh_private_key="$(first_non_empty "${INPUT_SSH_PRIVATE_KEY:-}" "${INPUT_TARGET_PRIVATE_KEY:-}")"
-ssh_private_key_file="$(first_non_empty "${INPUT_SSH_PRIVATE_KEY_FILE:-}" "${INPUT_TARGET_PRIVATE_KEY_FILE:-}")"
-server_proxy_kind="$(first_non_empty "${INPUT_SERVER_PROXY_KIND:-}" "${INPUT_TARGET_PROXY_KIND:-}")"
-server_name="${INPUT_TARGET_NAME:-}"
-server_provider="${INPUT_TARGET_PROVIDER:-}"
-ssh_public_key="${INPUT_TARGET_SSH_PUBLIC_KEY:-}"
+appaloft_bin="${APPALOFT_BIN:-appaloft}"
+wrapper_command="${INPUT_COMMAND:-deploy}"
+source_locator="${INPUT_SOURCE:-.}"
+config_path="${INPUT_CONFIG:-}"
+control_plane_mode="${INPUT_CONTROL_PLANE_MODE:-none}"
+control_plane_url="${INPUT_CONTROL_PLANE_URL:-}"
+appaloft_token="${INPUT_APPALOFT_TOKEN:-}"
+use_oidc="${INPUT_USE_OIDC:-false}"
+ssh_private_key="${INPUT_SSH_PRIVATE_KEY:-}"
+ssh_private_key_file="${INPUT_SSH_PRIVATE_KEY_FILE:-}"
 state_backend="${INPUT_STATE_BACKEND:-}"
+preview="${INPUT_PREVIEW:-}"
+preview_id="${INPUT_PREVIEW_ID:-}"
+preview_domain_template="${INPUT_PREVIEW_DOMAIN_TEMPLATE:-}"
+preview_tls_mode="${INPUT_PREVIEW_TLS_MODE:-}"
+require_preview_url="${INPUT_REQUIRE_PREVIEW_URL:-false}"
+preview_output_file=""
 
-materialized_ssh_private_key_file=""
-if [[ -z "$ssh_private_key_file" && -n "$ssh_private_key" ]]; then
-  mkdir -p "${runner_temp}/appaloft-deploy-action"
-  materialized_ssh_private_key_file="${runner_temp}/appaloft-deploy-action/ssh-key-${$}"
-  umask 077
-  printf '%s\n' "$ssh_private_key" >"$materialized_ssh_private_key_file"
-  chmod 600 "$materialized_ssh_private_key_file"
-  ssh_private_key_file="$materialized_ssh_private_key_file"
+case "$wrapper_command" in
+  ""|deploy)
+    wrapper_command="deploy"
+    ;;
+  preview-cleanup)
+    ;;
+  *)
+    error "Unsupported deploy-action command: $wrapper_command"
+    exit 1
+    ;;
+esac
+
+case "$control_plane_mode" in
+  ""|none)
+    ;;
+  *)
+    error "control-plane-mode=${control_plane_mode} is reserved until CLI control-plane handshakes are active"
+    exit 1
+    ;;
+esac
+
+if [ -n "$control_plane_url" ] || [ -n "$appaloft_token" ] || truthy "$use_oidc"; then
+  error "control-plane-url, appaloft-token, and use-oidc are reserved until control-plane mode is active"
+  exit 1
 fi
 
-target_requested=false
-for target_value in \
-  "$ssh_host" \
-  "$ssh_user" \
-  "$ssh_port" \
-  "$ssh_private_key_file" \
-  "$server_proxy_kind" \
-  "$server_name" \
-  "$server_provider" \
-  "$ssh_public_key"; do
-  if [[ -n "$target_value" ]]; then
-    target_requested=true
-    break
+if [ -n "$ssh_private_key" ] && [ -n "$ssh_private_key_file" ]; then
+  error "ssh-private-key and ssh-private-key-file are mutually exclusive"
+  exit 1
+fi
+
+if [ "$preview" = "pull-request" ] && [ -z "$preview_id" ]; then
+  error "preview-id is required when preview=pull-request"
+  exit 1
+fi
+
+if [ "$wrapper_command" = "preview-cleanup" ] && [ "$preview" != "pull-request" ]; then
+  error "preview-cleanup requires preview=pull-request"
+  exit 1
+fi
+
+if [ -n "$preview" ] && [ "$preview" != "pull-request" ]; then
+  error "Unsupported preview mode: $preview"
+  exit 1
+fi
+
+if [ -n "${INPUT_SSH_HOST:-}" ] && [ -z "$state_backend" ]; then
+  state_backend="ssh-pglite"
+fi
+
+if [ -n "$ssh_private_key" ]; then
+  generated_key_file="$(mktemp "${RUNNER_TEMP:-/tmp}/appaloft-ssh-key.XXXXXX")"
+  printf '%s\n' "$ssh_private_key" > "$generated_key_file"
+  chmod 600 "$generated_key_file"
+  ssh_private_key_file="$generated_key_file"
+fi
+
+if [ -n "$preview" ] && [ "$wrapper_command" = "deploy" ]; then
+  generated_preview_output_file="$(mktemp "${RUNNER_TEMP:-/tmp}/appaloft-preview-output.XXXXXX")"
+  preview_output_file="$generated_preview_output_file"
+fi
+
+case "$wrapper_command" in
+  deploy)
+    argv=("$appaloft_bin" "deploy" "$source_locator")
+    ;;
+  preview-cleanup)
+    argv=("$appaloft_bin" "preview" "cleanup" "$source_locator")
+    ;;
+esac
+
+if [ -n "$config_path" ]; then
+  append_option "--config" "$config_path"
+elif [ -f "appaloft.yml" ]; then
+  append_option "--config" "appaloft.yml"
+fi
+
+if [ "$wrapper_command" = "deploy" ]; then
+  append_option "--runtime-name" "${INPUT_RUNTIME_NAME:-}"
+fi
+append_option "--server-host" "${INPUT_SSH_HOST:-}"
+append_option "--server-ssh-username" "${INPUT_SSH_USER:-}"
+append_option "--server-port" "${INPUT_SSH_PORT:-}"
+append_option "--server-provider" "${INPUT_SERVER_PROVIDER:-generic-ssh}"
+append_option "--server-proxy-kind" "${INPUT_SERVER_PROXY_KIND:-}"
+append_option "--server-ssh-private-key-file" "$ssh_private_key_file"
+append_option "--state-backend" "$state_backend"
+append_option "--preview" "$preview"
+append_option "--preview-id" "$preview_id"
+
+if [ "$wrapper_command" = "deploy" ]; then
+  append_option "--preview-domain-template" "$preview_domain_template"
+  append_option "--preview-tls-mode" "$preview_tls_mode"
+  append_option "--preview-output-file" "$preview_output_file"
+fi
+
+if [ "$wrapper_command" = "deploy" ] && truthy "$require_preview_url"; then
+  append_arg "--require-preview-url"
+fi
+
+if truthy "${APPALOFT_DEPLOY_ACTION_DRY_RUN:-false}"; then
+  if [ -n "${APPALOFT_DEPLOY_ACTION_ARGV_PATH:-}" ]; then
+    printf '%s\n' "${argv[@]}" > "$APPALOFT_DEPLOY_ACTION_ARGV_PATH"
+  else
+    printf '%q ' "${argv[@]}"
+    printf '\n'
   fi
-done
+else
+  "${argv[@]}"
+fi
 
-if [[ "$target_requested" == "true" ]]; then
-  add_arg "--server-name" "$server_name"
-  add_arg "--server-host" "$ssh_host"
+preview_url=""
+if [ -n "$preview_output_file" ] && [ -f "$preview_output_file" ]; then
+  while IFS='=' read -r key value; do
+    case "$key" in
+      preview-id)
+        if [ -z "$preview_id" ]; then
+          preview_id="$value"
+        fi
+        ;;
+      preview-url)
+        preview_url="$value"
+        ;;
+    esac
+  done < "$preview_output_file"
+fi
 
-  if [[ -n "$server_provider" ]]; then
-    add_arg "--server-provider" "$server_provider"
-  elif [[ -n "$ssh_host" ]]; then
-    add_arg "--server-provider" "generic-ssh"
+if [ -n "$preview_id" ]; then
+  echo "preview-id=$preview_id" >> "${GITHUB_OUTPUT:-/dev/null}"
+fi
+
+if [ -z "$preview_url" ] && [ -n "$preview_domain_template" ]; then
+  if [ "$preview_tls_mode" = "disabled" ]; then
+    preview_url="http://${preview_domain_template}"
+  else
+    preview_url="https://${preview_domain_template}"
   fi
-
-  add_arg "--server-port" "$ssh_port"
-  add_arg "--server-proxy-kind" "$server_proxy_kind"
-  add_arg "--server-ssh-username" "$ssh_user"
-  add_arg "--server-ssh-public-key" "$ssh_public_key"
-  add_arg "--server-ssh-private-key-file" "$ssh_private_key_file"
 fi
 
-if [[ -n "$state_backend" ]]; then
-  add_arg "--state-backend" "$state_backend"
-elif [[ -n "$ssh_host" ]]; then
-  add_arg "--state-backend" "ssh-pglite"
+if [ -n "$preview_url" ]; then
+  echo "preview-url=$preview_url" >> "${GITHUB_OUTPUT:-/dev/null}"
 fi
-
-if [[ -n "${INPUT_ARGS:-}" ]]; then
-  read -r -a extra_args <<<"${INPUT_ARGS}"
-  args+=("${extra_args[@]}")
-fi
-
-echo "Running appaloft ${args[*]}"
-appaloft "${args[@]}"
