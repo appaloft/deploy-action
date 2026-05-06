@@ -1,135 +1,194 @@
-# deploy-action
+# Appaloft Deploy Action
 
-Deploy a repository with Appaloft from GitHub Actions.
+Install the Appaloft CLI in GitHub Actions and run the repository deployment workflow.
+
+This action is a thin wrapper around the released `appaloft` binary. It does not create a hosted
+control plane, does not add a new deployment command, and does not read Appaloft project, resource,
+server, credential, or secret identity from committed `appaloft.yml`.
+
+## Basic Deploy
 
 ```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: appaloft/deploy-action@v0
+
+      - uses: appaloft/deploy-action@v1
         with:
-          version: latest
+          version: v0.9.0
           config: appaloft.yml
-          ssh-host: ${{ vars.APPALOFT_SSH_HOST }}
-          ssh-user: deploy
+          ssh-host: ${{ secrets.APPALOFT_SSH_HOST }}
+          ssh-user: ${{ secrets.APPALOFT_SSH_USER }}
           ssh-private-key: ${{ secrets.APPALOFT_SSH_PRIVATE_KEY }}
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
 ```
 
-## Repository Config
+Pin `version` to an Appaloft CLI release for production workflows. `version: latest` is useful for
+quick experiments, but it trades repeatability for convenience.
 
-Keep deployment intent in `appaloft.yml`, but do not commit raw secret values or trusted hosted
-control-plane ids.
+Minimal `appaloft.yml`:
 
 ```yaml
 runtime:
-  build: npm run build
-  start: npm run start
-
+  strategy: workspace-commands
+  buildCommand: bun install && bun run build
+  startCommand: bun run start
 network:
-  port: 3000
+  internalPort: 3000
+```
 
+Application secrets should be mapped by the workflow and referenced from config, not committed as
+values:
+
+```yaml
 secrets:
   DATABASE_URL:
     from: ci-env:DATABASE_URL
 ```
 
-GitHub Actions supplies application secrets through normal workflow environment variables:
+## Pull Request Preview
+
+Action-only pull request previews require a workflow file. The action does not install a webhook or
+make GitHub run previews on its own.
 
 ```yaml
-env:
-  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+name: Appaloft Preview
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: preview-pr-${{ github.event.pull_request.number }}
+      url: ${{ steps.deploy.outputs.preview-url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: appaloft/deploy-action@v1
+        id: deploy
+        with:
+          version: v0.9.0
+          config: appaloft.preview.yml
+          preview: pull-request
+          preview-id: pr-${{ github.event.pull_request.number }}
+          preview-domain-template: pr-${{ github.event.pull_request.number }}.preview.example.com
+          preview-tls-mode: disabled
+          require-preview-url: true
+          ssh-host: ${{ secrets.APPALOFT_SSH_HOST }}
+          ssh-user: ${{ secrets.APPALOFT_SSH_USER }}
+          ssh-private-key: ${{ secrets.APPALOFT_SSH_PRIVATE_KEY }}
 ```
 
-## Remote State Default
+The default example skips fork pull requests before deployment credentials are exposed. Fork
+previews need an explicit reduced-credential policy.
 
-This action is a thin, checked binary wrapper around the Appaloft CLI:
+Use `appaloft.preview.yml` when the root config is production-oriented. Preview route intent should
+come from generated/default access, this trusted `preview-domain-template`, or an explicitly
+selected preview config file. Production `access.domains[]` should not be reinterpreted as pull
+request preview hostnames.
 
-- downloads an Appaloft CLI release asset from GitHub Releases;
-- verifies the asset with `checksums.txt` before adding it to `PATH`;
-- writes `ssh-private-key` to a temporary `0600` file and passes only the file path to the CLI;
-- invokes `appaloft deploy` with the same config-file flow used by the CLI;
-- defaults Appaloft's own state to `ssh-pglite` when `ssh-host` is provided.
+## Preview Cleanup
 
-The GitHub runner is not the durable Appaloft state store in the default SSH path. Application
-secrets such as `DATABASE_URL` are separate from Appaloft's own state and should be provided through
-GitHub Actions `secrets` plus `ci-env:` references in `appaloft.yml`.
-
-## No Config
-
-If `config` is omitted and `appaloft.yml` does not exist, the action does not pass `--config`.
-Deployment can still run from direct action inputs and CLI detection:
+Add a separate close-event workflow so preview runtime and route state are cleaned when the pull
+request closes:
 
 ```yaml
-- uses: appaloft/deploy-action@v0
-  with:
-    source: .
-    ssh-host: ${{ vars.APPALOFT_SSH_HOST }}
-    ssh-user: deploy
-    ssh-private-key: ${{ secrets.APPALOFT_SSH_PRIVATE_KEY }}
+name: Appaloft Preview Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: appaloft/deploy-action@v1
+        with:
+          command: preview-cleanup
+          version: v0.9.0
+          config: appaloft.preview.yml
+          preview: pull-request
+          preview-id: pr-${{ github.event.pull_request.number }}
+          ssh-host: ${{ secrets.APPALOFT_SSH_HOST }}
+          ssh-user: ${{ secrets.APPALOFT_SSH_USER }}
+          ssh-private-key: ${{ secrets.APPALOFT_SSH_PRIVATE_KEY }}
 ```
 
-If `appaloft.yml` exists, the action passes `--config appaloft.yml`. A config file without
-`access.domains[]` does not bind a custom domain; provider-local TLS diagnostics can still run for
-the provider default route.
-
-## Hosted Or Self-Hosted Control Plane
-
-The first public path does not require `APPALOFT_PROJECT_ID`. Trusted ids are advanced overrides for
-a hosted Appaloft service or self-hosted control plane:
-
-```yaml
-- uses: appaloft/deploy-action@v0
-  with:
-    project-id: ${{ vars.APPALOFT_PROJECT_ID }}
-    server-id: ${{ vars.APPALOFT_SERVER_ID }}
-    environment-id: ${{ vars.APPALOFT_ENVIRONMENT_ID }}
-    resource-id: ${{ vars.APPALOFT_RESOURCE_ID }}
-```
+Cleanup is idempotent. It stops preview-owned runtime state when present, removes preview route
+desired state, unlinks preview source identity, and preserves production deployments and ordinary
+deployment history.
 
 ## Inputs
 
-| Input | Default | Description |
+| Input | Default | Purpose |
 | --- | --- | --- |
-| `version` | `latest` | Appaloft CLI GitHub Release tag, or `latest`. |
-| `config` | `appaloft.yml` | Path to `appaloft.yml`. The default is passed only when the file exists. |
-| `source` | `.` | Local path, git source, image source, or remote source to deploy. |
-| `method` | | Deployment method override. |
-| `ssh-host` | | SSH host for remote Appaloft state and deployment execution. |
-| `ssh-user` | | SSH username for the target server. |
-| `ssh-port` | | SSH port. The CLI defaults to `22` when omitted. |
-| `ssh-private-key` | | SSH private key material from a GitHub secret. |
-| `ssh-private-key-file` | | Path to an SSH private key file already present on the runner. |
-| `server-proxy-kind` | | Edge proxy kind, for example `traefik`, `caddy`, or `none`. |
-| `state-backend` | `ssh-pglite` when `ssh-host` is set | Appaloft state backend override. |
-| `args` | | Additional Appaloft CLI arguments appended after translated inputs. |
-| `project-id` | | Advanced trusted project id override. |
-| `server-id` | | Advanced trusted server id override. |
-| `destination-id` | | Advanced trusted destination id override. |
-| `environment-id` | | Advanced trusted environment id override. |
-| `resource-id` | | Advanced trusted resource id override. |
-| `resource-name` | | Resource name to create or reuse when `resource-id` is not supplied. |
-| `resource-kind` | | Resource kind to create when `resource-id` is not supplied. |
-| `resource-description` | | Resource description to create when `resource-id` is not supplied. |
-| `install` | | Install command override. |
-| `build` | | Build command override. |
-| `start` | | Start command override. |
-| `publish-dir` | | Static publish directory override. |
-| `port` | | Application port override. |
-| `health-path` | | Health check path override. |
-| `app-log-lines` | `3` | Number of application log lines to print after deployment. |
+| `command` | `deploy` | `deploy` or `preview-cleanup`. |
+| `version` | `latest` | Appaloft CLI release tag such as `v0.9.0`. |
+| `config` | empty | Optional Appaloft config path. If omitted, `appaloft.yml` is used only when present. |
+| `source` | `.` | Source path or locator passed to the CLI. |
+| `runtime-name` | empty | Trusted runtime name override for deploy. |
+| `ssh-host` | empty | SSH target host for pure SSH deployments. |
+| `ssh-user` | empty | SSH username. |
+| `ssh-port` | empty | SSH port. |
+| `ssh-private-key` | empty | SSH private key value, written to a temp file before invoking Appaloft. |
+| `ssh-private-key-file` | empty | Existing runner-local private key path. Mutually exclusive with `ssh-private-key`. |
+| `server-provider` | `generic-ssh` | Server provider key. |
+| `server-proxy-kind` | empty | Server proxy kind such as `traefik` or `caddy`. |
+| `state-backend` | empty | Explicit state backend. SSH targets default to `ssh-pglite`. |
+| `preview` | empty | Use `pull-request` for PR preview deploy or cleanup. |
+| `preview-id` | empty | Trusted preview scope, for example `pr-123`. Required for pull request previews. |
+| `preview-domain-template` | empty | Trusted preview hostname for deploy, for example `pr-123.preview.example.com`. |
+| `preview-tls-mode` | empty | Preview TLS mode for `preview-domain-template`. |
+| `require-preview-url` | `false` | Fail deploy if no public preview URL can be resolved. |
+| `control-plane-mode` | `none` | Reserved for future Cloud/self-hosted control-plane mode. |
+| `control-plane-url` | empty | Reserved for future control-plane endpoint. |
+| `appaloft-token` | empty | Reserved for future control-plane token. |
+| `use-oidc` | `false` | Reserved for future GitHub OIDC exchange. |
 
-Legacy `target-*` and `path-or-source` inputs remain accepted as aliases for older workflows.
+## Outputs
 
-## Release Model
+| Output | Purpose |
+| --- | --- |
+| `appaloft-version` | Installed CLI version. |
+| `appaloft-target` | Selected release target. |
+| `preview-id` | Preview id when preview mode is selected. |
+| `preview-url` | Public preview URL when Appaloft resolves one during deploy. |
 
-This repo is released only when the GitHub Actions wrapper changes. CLI changes ship from the main
-Appaloft repo as GitHub Release assets. Workflows using `version: latest` pick up the newest CLI
-release without requiring a deploy-action repo release.
+## Security Notes
 
-## License
+- `ssh-private-key` is written to a runner temp file with mode `0600`; raw key material is not
+  passed as a command-line argument.
+- Do not commit SSH keys, tokens, database URLs, production secret values, or Appaloft identity
+  selectors into `appaloft.yml`.
+- The action defaults SSH deployments to server-owned `ssh-pglite` state when `ssh-host` is set and
+  no control plane is selected.
+- Control-plane inputs are reserved until the Appaloft CLI handshake is active; non-`none` values
+  fail before mutation.
 
-Apache-2.0.
+## Product-Grade Previews
+
+This action supports workflow-file previews. Product-grade previews with GitHub App webhooks,
+preview policy, comments/checks, cleanup retries, quotas, audit, and managed domain lifecycle are
+future Appaloft Cloud or self-hosted control-plane features.

@@ -1,177 +1,142 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-fail() {
-  echo "appaloft deploy-action: $*" >&2
-  exit 1
-}
+repository="appaloft/appaloft"
+version="${INPUT_VERSION:-latest}"
+runner_temp="${RUNNER_TEMP:-/tmp}"
+install_root="${runner_temp%/}/appaloft-deploy-action"
+mkdir -p "$install_root"
 
-has_command() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-json_tag_name() {
-  sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
-}
-
-sha256_file() {
-  local file="$1"
-
-  if has_command sha256sum; then
-    sha256sum "$file" | awk '{print $1}'
-    return
-  fi
-
-  if has_command shasum; then
-    shasum -a 256 "$file" | awk '{print $1}'
-    return
-  fi
-
-  fail "sha256sum or shasum is required to verify Appaloft release assets"
+error() {
+  echo "::error::$*" >&2
 }
 
 detect_target() {
-  local os="${RUNNER_OS:-}"
-  local machine
-  machine="$(uname -m)"
-
-  if [[ -z "$os" ]]; then
-    case "$(uname -s)" in
-      Darwin) os="macOS" ;;
-      Linux) os="Linux" ;;
-      MINGW* | MSYS* | CYGWIN*) os="Windows" ;;
-      *) fail "unsupported runner OS: $(uname -s)" ;;
-    esac
-  fi
-
-  case "$machine" in
-    x86_64 | amd64) machine="x64" ;;
-    arm64 | aarch64) machine="arm64" ;;
-    *) fail "unsupported runner architecture: $machine" ;;
-  esac
+  local os
+  local arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
 
   case "$os" in
-    Linux) echo "linux-${machine}-gnu" ;;
-    macOS) echo "darwin-${machine}" ;;
-    Windows) echo "win32-${machine}" ;;
-    *) fail "unsupported runner OS: $os" ;;
+    Darwin)
+      os="darwin"
+      ;;
+    Linux)
+      os="linux"
+      ;;
+    *)
+      error "Unsupported runner OS: $os"
+      exit 1
+      ;;
   esac
-}
 
-download() {
-  local url="$1"
-  local output="$2"
+  case "$arch" in
+    arm64|aarch64)
+      arch="arm64"
+      ;;
+    x86_64|amd64)
+      arch="x64"
+      ;;
+    *)
+      error "Unsupported runner architecture: $arch"
+      exit 1
+      ;;
+  esac
 
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "$url" -o "$output"
-  else
-    curl -fsSL "$url" -o "$output"
-  fi
-}
-
-resolve_latest_tag() {
-  local repo="$1"
-  local release_dir="$2"
-  local latest_json
-
-  if [[ -n "$release_dir" ]]; then
-    latest_json="${release_dir}/latest.json"
-    [[ -f "$latest_json" ]] || fail "latest.json is required when APPALOFT_ACTION_RELEASE_DIR is used with version latest"
-    json_tag_name <"$latest_json"
+  if [ "$os" = "linux" ]; then
+    if ldd --version 2>&1 | grep -qi musl; then
+      printf '%s-%s-musl\n' "$os" "$arch"
+    else
+      printf '%s-%s-gnu\n' "$os" "$arch"
+    fi
     return
   fi
 
-  local api_url="https://api.github.com/repos/${repo}/releases/latest"
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "$api_url" | json_tag_name
-  else
-    curl -fsSL "$api_url" | json_tag_name
-  fi
+  printf '%s-%s\n' "$os" "$arch"
 }
 
-version="${1:-${INPUT_VERSION:-latest}}"
-repo="${APPALOFT_ACTION_REPOSITORY:-appaloft/appaloft}"
-release_dir="${APPALOFT_ACTION_RELEASE_DIR:-}"
-target="${APPALOFT_ACTION_TARGET:-$(detect_target)}"
-runner_temp="${RUNNER_TEMP:-/tmp}"
-work_dir="${runner_temp}/appaloft-deploy-action/install"
+resolve_latest_version() {
+  local headers=()
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    headers=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  fi
 
-mkdir -p "$work_dir"
+  curl -fsSL "${headers[@]}" "https://api.github.com/repos/${repository}/releases/latest" |
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+    head -n 1
+}
 
-if [[ "$version" == "latest" ]]; then
-  tag="$(resolve_latest_tag "$repo" "$release_dir")"
-  [[ -n "$tag" ]] || fail "could not resolve latest Appaloft release"
-else
-  tag="$version"
+if [ "$version" = "latest" ]; then
+  version="$(resolve_latest_version)"
 fi
 
-if [[ "$tag" != v* ]]; then
-  tag="v${tag}"
+if [ -z "$version" ]; then
+  error "Unable to resolve Appaloft release version"
+  exit 1
 fi
 
-case "$target" in
-  win32-*) extension="zip" ;;
-  *) extension="tar.gz" ;;
+case "$version" in
+  v*)
+    version_tag="$version"
+    version_number="${version#v}"
+    ;;
+  *)
+    version_tag="v${version}"
+    version_number="$version"
+    ;;
 esac
 
-asset_name="appaloft-${tag}-${target}.${extension}"
-archive_path="${work_dir}/${asset_name}"
-checksums_path="${work_dir}/checksums.txt"
+target="$(detect_target)"
+archive_name="appaloft-v${version_number}-${target}.tar.gz"
+release_base_url="https://github.com/${repository}/releases/download/${version_tag}"
+archive_path="${install_root}/${archive_name}"
+checksums_path="${install_root}/checksums.txt"
+extract_dir="${install_root}/appaloft-v${version_number}-${target}"
 
-if [[ -n "$release_dir" ]]; then
-  [[ -f "${release_dir}/${asset_name}" ]] || fail "release asset not found: ${release_dir}/${asset_name}"
-  [[ -f "${release_dir}/checksums.txt" ]] || fail "checksums.txt not found in ${release_dir}"
-  cp "${release_dir}/${asset_name}" "$archive_path"
-  cp "${release_dir}/checksums.txt" "$checksums_path"
+curl -fsSL "${release_base_url}/${archive_name}" -o "$archive_path"
+curl -fsSL "${release_base_url}/checksums.txt" -o "$checksums_path"
+
+expected_checksum="$(
+  awk -v asset="$archive_name" '$2 == asset { print $1 }' "$checksums_path"
+)"
+
+if [ -z "$expected_checksum" ]; then
+  error "checksums.txt does not contain ${archive_name}"
+  exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_checksum="$(sha256sum "$archive_path" | awk '{ print $1 }')"
 else
-  base_url="https://github.com/${repo}/releases/download/${tag}"
-  download "${base_url}/${asset_name}" "$archive_path"
-  download "${base_url}/checksums.txt" "$checksums_path"
+  actual_checksum="$(shasum -a 256 "$archive_path" | awk '{ print $1 }')"
 fi
 
-expected_checksum="$(awk -v file="$asset_name" '$2 == file {print $1}' "$checksums_path" | head -n 1)"
-[[ -n "$expected_checksum" ]] || fail "checksum for ${asset_name} was not found in checksums.txt"
-
-actual_checksum="$(sha256_file "$archive_path")"
-if [[ "$actual_checksum" != "$expected_checksum" ]]; then
-  fail "checksum mismatch for ${asset_name}: expected ${expected_checksum}, got ${actual_checksum}"
+if [ "$actual_checksum" != "$expected_checksum" ]; then
+  error "Checksum mismatch for ${archive_name}"
+  exit 1
 fi
 
-extract_dir="${work_dir}/${tag}-${target}/extract"
-bin_dir="${work_dir}/${tag}-${target}/bin"
-rm -rf "$extract_dir" "$bin_dir"
-mkdir -p "$extract_dir" "$bin_dir"
+rm -rf "$extract_dir"
+mkdir -p "$extract_dir"
+tar -xzf "$archive_path" -C "$extract_dir"
 
-case "$extension" in
-  zip)
-    has_command unzip || fail "unzip is required to extract ${asset_name}"
-    unzip -q "$archive_path" -d "$extract_dir"
-    binary_path="$(find "$extract_dir" -type f \( -name appaloft -o -name appaloft.exe \) | head -n 1)"
-    binary_name="appaloft.exe"
-    ;;
-  tar.gz)
-    tar -xzf "$archive_path" -C "$extract_dir"
-    binary_path="$(find "$extract_dir" -type f -name appaloft | head -n 1)"
-    binary_name="appaloft"
-    ;;
-  *) fail "unsupported archive extension: ${extension}" ;;
-esac
-
-[[ -n "${binary_path:-}" ]] || fail "Appaloft CLI binary was not found in ${asset_name}"
-
-cp "$binary_path" "${bin_dir}/${binary_name}"
-chmod +x "${bin_dir}/${binary_name}"
-
-if [[ -n "${GITHUB_PATH:-}" ]]; then
-  echo "$bin_dir" >>"$GITHUB_PATH"
+appaloft_bin="$(find "$extract_dir" -type f -name appaloft -print | head -n 1)"
+if [ -z "$appaloft_bin" ]; then
+  error "Extracted archive did not contain an appaloft binary"
+  exit 1
 fi
 
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  {
-    echo "appaloft-version=${tag}"
-    echo "appaloft-target=${target}"
-    echo "appaloft-bin-dir=${bin_dir}"
-  } >>"$GITHUB_OUTPUT"
+chmod +x "$appaloft_bin"
+appaloft_bin_dir="$(dirname "$appaloft_bin")"
+
+if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "$appaloft_bin_dir" >> "$GITHUB_PATH"
 fi
 
-echo "Installed Appaloft CLI ${tag} for ${target}"
+{
+  echo "appaloft-bin=$appaloft_bin"
+  echo "appaloft-version=$version_tag"
+  echo "appaloft-target=$target"
+} >> "${GITHUB_OUTPUT:-/dev/null}"
+
+echo "Installed Appaloft ${version_tag} for ${target}"
