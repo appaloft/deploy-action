@@ -241,6 +241,38 @@ append_auth_header() {
   fi
 }
 
+deployment_console_url() {
+  local base_url="$1"
+  local deployment="$2"
+  if [ -z "$base_url" ] || [ -z "$deployment" ]; then
+    printf ''
+    return 0
+  fi
+
+  printf '%s/deployments/%s' "${base_url%/}" "$deployment"
+}
+
+console_href_url() {
+  local base_url="$1"
+  local href="$2"
+  if [ -z "$href" ]; then
+    printf ''
+    return 0
+  fi
+
+  case "$href" in
+    http://*|https://*)
+      printf '%s' "$href"
+      ;;
+    /*)
+      printf '%s%s' "${base_url%/}" "$href"
+      ;;
+    *)
+      printf '%s/%s' "${base_url%/}" "$href"
+      ;;
+  esac
+}
+
 append_step_summary() {
   if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
     return 0
@@ -254,7 +286,11 @@ append_step_summary() {
     fi
     printf -- '- Console: %s\n' "$control_plane_url"
     if [ -n "${deployment_id:-}" ]; then
-      printf -- '- Deployment: `%s`\n' "$deployment_id"
+      if [ -n "${deployment_url:-}" ]; then
+        printf -- '- Deployment: [%s](%s)\n' "$deployment_id" "$deployment_url"
+      else
+        printf -- '- Deployment: `%s`\n' "$deployment_id"
+      fi
     fi
     if [ -n "${cleanup_status:-}" ]; then
       printf -- '- Cleanup status: `%s`\n' "$cleanup_status"
@@ -300,15 +336,20 @@ build_pr_comment_body() {
     const consoleUrl = process.argv[4];
     const previewUrl = process.argv[5];
     const deploymentId = process.argv[6];
-    const cleanupStatus = process.argv[7];
+    const deploymentUrl = process.argv[7];
+    const cleanupStatus = process.argv[8];
     const lines = [marker, "", command === "preview-cleanup" ? "### Appaloft preview cleanup" : "### Appaloft deployment", ""];
     if (previewId) lines.push(`- Preview: \`${previewId}\``);
     if (previewUrl) lines.push(`- Preview URL: ${previewUrl}`);
     if (consoleUrl) lines.push(`- Console: ${consoleUrl}`);
-    if (deploymentId) lines.push(`- Deployment: \`${deploymentId}\``);
+    if (deploymentUrl) {
+      lines.push(`- Deployment: [${deploymentId || "Open deployment"}](${deploymentUrl})`);
+    } else if (deploymentId) {
+      lines.push(`- Deployment: \`${deploymentId}\``);
+    }
     if (cleanupStatus) lines.push(`- Cleanup status: \`${cleanupStatus}\``);
     process.stdout.write(JSON.stringify({ body: `${lines.join("\n")}\n` }));
-  ' "$1" "$wrapper_command" "$preview_id" "${control_plane_url:-}" "${preview_url:-}" "${deployment_id:-}" "${cleanup_status:-}"
+  ' "$1" "$wrapper_command" "$preview_id" "${control_plane_url:-}" "${preview_url:-}" "${deployment_id:-}" "${deployment_url:-}" "${cleanup_status:-}"
 }
 
 warn_pr_comment_skipped() {
@@ -526,8 +567,8 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
     exit 1
   fi
 
-  if [ "$wrapper_command" = "deploy" ] && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url"; }; then
-    error "self-hosted control-plane mode deploys an existing Appaloft resource profile; config, source, runtime-name, and preview inputs are not applied in this slice"
+  if [ "$wrapper_command" = "deploy" ] && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ] || [ -n "$secret_variables" ]; }; then
+    error "self-hosted control-plane mode deploys an existing Appaloft resource profile; source, runtime/profile, environment, secret, and preview route inputs are not applied in this slice"
     exit 1
   fi
 
@@ -592,11 +633,20 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
         error "self-hosted control-plane deploy response did not include deployment id"
         exit 1
       fi
+      deployment_url="$(printf '%s\n' "$deploy_response" | sed -n 's/.*"deploymentUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      deployment_href="$(printf '%s\n' "$deploy_response" | sed -n 's/.*"deploymentHref"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      if [ -z "$deployment_url" ] && [ -n "$deployment_href" ]; then
+        deployment_url="$(console_href_url "$control_plane_url" "$deployment_href")"
+      fi
+      if [ -z "$deployment_url" ]; then
+        deployment_url="$(deployment_console_url "$control_plane_url" "$deployment_id")"
+      fi
       echo "deployment-id=$deployment_id" >> "${GITHUB_OUTPUT:-/dev/null}"
+      echo "deployment-url=$deployment_url" >> "${GITHUB_OUTPUT:-/dev/null}"
     fi
   fi
 
-  if [ "$wrapper_command" = "preview-cleanup" ] && [ -n "$preview_id" ]; then
+  if [ -n "$preview_id" ]; then
     echo "preview-id=$preview_id" >> "${GITHUB_OUTPUT:-/dev/null}"
   fi
   echo "console-url=$control_plane_url" >> "${GITHUB_OUTPUT:-/dev/null}"
