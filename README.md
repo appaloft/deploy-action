@@ -208,7 +208,8 @@ When `pr-comment: true`, the action posts or updates one stable pull request com
 preview URL, console URL, deployment id, or cleanup status that is available for the selected mode.
 The workflow must pass `github-token: ${{ github.token }}` and grant `pull-requests: write` or
 `issues: write`. This is entrypoint feedback only; product-grade GitHub App comments/checks remain
-control-plane features.
+control-plane features. Comment publishing is best-effort: GitHub API permission failures are
+reported as warnings and do not fail an otherwise successful deployment or cleanup.
 
 The control-plane connection policy can live in `appaloft.yml`:
 
@@ -284,7 +285,8 @@ source-link state, or the Appaloft server, not from committed config.
   preview scope inputs. Deployment target ids are intentionally ignored/rejected because cleanup
   resolves from server-owned source-link state.
 - `pr-comment` requires explicit workflow permission and token wiring. The action updates the same
-  marker comment for the PR instead of creating a new comment on each run.
+  marker comment for the PR instead of creating a new comment on each run. Comment API failures are
+  warnings so they do not mask a successful deployment.
 
 ## Product-Grade Previews
 
