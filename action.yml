@@ -1,5 +1,5 @@
 name: Appaloft Deploy
-description: Install the Appaloft CLI and run the repository deployment workflow.
+description: Run an Appaloft deployment from GitHub Actions through pure SSH CLI mode or self-hosted server API mode.
 
 inputs:
   command:
@@ -54,6 +54,14 @@ inputs:
     description: Appaloft state backend. Defaults to ssh-pglite when ssh-host is supplied.
     required: false
     default: ""
+  environment-variables:
+    description: Newline-separated environment variables passed as repeated CLI --env values in pure CLI mode.
+    required: false
+    default: ""
+  secret-variables:
+    description: Newline-separated secret variables passed as repeated CLI --secret values in pure CLI mode.
+    required: false
+    default: ""
   preview:
     description: Preview mode. The first accepted value is pull-request.
     required: false
@@ -74,22 +82,50 @@ inputs:
     description: Fail when no public preview URL is resolved.
     required: false
     default: "false"
-  control-plane-mode:
-    description: Future control-plane mode. Only none is accepted by this wrapper baseline.
+  pr-comment:
+    description: Post or update a pull request comment with preview, deployment, cleanup, and console links.
     required: false
-    default: "none"
+    default: "false"
+  github-token:
+    description: "GitHub token used only when pr-comment is true. The workflow must grant pull-requests: write or issues: write."
+    required: false
+    default: ""
+  control-plane-mode:
+    description: Control-plane mode. Use none for pure SSH CLI mode or self-hosted for server API mode.
+    required: false
+    default: ""
   control-plane-url:
-    description: Future control-plane endpoint.
+    description: Self-hosted Appaloft server endpoint for server API mode.
     required: false
     default: ""
   appaloft-token:
-    description: Future control-plane token.
+    description: Optional bearer token for self-hosted Appaloft server API mode.
     required: false
     default: ""
   use-oidc:
-    description: Future GitHub OIDC exchange toggle.
+    description: Future GitHub OIDC exchange toggle. Not yet supported.
     required: false
     default: "false"
+  project-id:
+    description: Trusted Appaloft project id for self-hosted server API mode.
+    required: false
+    default: ""
+  environment-id:
+    description: Trusted Appaloft environment id for self-hosted server API mode.
+    required: false
+    default: ""
+  resource-id:
+    description: Trusted Appaloft resource id for self-hosted server API mode.
+    required: false
+    default: ""
+  server-id:
+    description: Trusted Appaloft deployment target id for self-hosted server API mode.
+    required: false
+    default: ""
+  destination-id:
+    description: Optional trusted Appaloft destination id for self-hosted server API mode.
+    required: false
+    default: ""
 
 outputs:
   appaloft-version:
@@ -104,11 +140,29 @@ outputs:
   preview-url:
     description: Preview URL resolved by the CLI from generated/default access or custom preview route intent.
     value: ${{ steps.deploy.outputs.preview-url }}
+  deployment-id:
+    description: Deployment id accepted by Appaloft.
+    value: ${{ steps.deploy.outputs.deployment-id }}
+  console-url:
+    description: Self-hosted Appaloft console URL used by server API mode.
+    value: ${{ steps.deploy.outputs.console-url }}
+  preview-cleanup-status:
+    description: Preview cleanup status when command is preview-cleanup.
+    value: ${{ steps.deploy.outputs.preview-cleanup-status }}
 
 runs:
   using: composite
   steps:
+    - id: resolve
+      shell: bash
+      env:
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_CONTROL_PLANE_MODE: ${{ inputs.control-plane-mode }}
+        INPUT_CONTROL_PLANE_URL: ${{ inputs.control-plane-url }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/resolve-control-plane.sh"
+
     - id: install
+      if: ${{ steps.resolve.outputs.control-plane-mode == 'none' }}
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
@@ -131,13 +185,22 @@ runs:
         INPUT_SERVER_PROVIDER: ${{ inputs.server-provider }}
         INPUT_SERVER_PROXY_KIND: ${{ inputs.server-proxy-kind }}
         INPUT_STATE_BACKEND: ${{ inputs.state-backend }}
+        INPUT_ENVIRONMENT_VARIABLES: ${{ inputs.environment-variables }}
+        INPUT_SECRET_VARIABLES: ${{ inputs.secret-variables }}
         INPUT_PREVIEW: ${{ inputs.preview }}
         INPUT_PREVIEW_ID: ${{ inputs.preview-id }}
         INPUT_PREVIEW_DOMAIN_TEMPLATE: ${{ inputs.preview-domain-template }}
         INPUT_PREVIEW_TLS_MODE: ${{ inputs.preview-tls-mode }}
         INPUT_REQUIRE_PREVIEW_URL: ${{ inputs.require-preview-url }}
-        INPUT_CONTROL_PLANE_MODE: ${{ inputs.control-plane-mode }}
-        INPUT_CONTROL_PLANE_URL: ${{ inputs.control-plane-url }}
+        INPUT_PR_COMMENT: ${{ inputs.pr-comment }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_CONTROL_PLANE_MODE: ${{ steps.resolve.outputs.control-plane-mode }}
+        INPUT_CONTROL_PLANE_URL: ${{ steps.resolve.outputs.control-plane-url }}
         INPUT_APPALOFT_TOKEN: ${{ inputs.appaloft-token }}
         INPUT_USE_OIDC: ${{ inputs.use-oidc }}
+        INPUT_PROJECT_ID: ${{ inputs.project-id }}
+        INPUT_ENVIRONMENT_ID: ${{ inputs.environment-id }}
+        INPUT_RESOURCE_ID: ${{ inputs.resource-id }}
+        INPUT_SERVER_ID: ${{ inputs.server-id }}
+        INPUT_DESTINATION_ID: ${{ inputs.destination-id }}
       run: $GITHUB_ACTION_PATH/scripts/run-deploy.sh

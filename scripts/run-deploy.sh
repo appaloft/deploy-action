@@ -28,6 +28,348 @@ append_option() {
   fi
 }
 
+append_multiline_option() {
+  local name="$1"
+  local value="$2"
+  local line
+
+  if [ -z "$value" ]; then
+    return
+  fi
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -n "$line" ]; then
+      argv+=("$name" "$line")
+    fi
+  done <<< "$value"
+}
+
+json_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+normalized_url() {
+  local value="$1"
+  value="${value%/}"
+  printf '%s' "$value"
+}
+
+trim_config_value() {
+  local value="$1"
+  value="${value%%#*}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s' "$value"
+}
+
+read_yaml_block_value() {
+  local file="$1"
+  local block="$2"
+  local key="$3"
+  awk -v block="$block" -v key="$key" '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    /^[^[:space:]][^:]*:/ {
+      expected = "^" block ":[[:space:]]*$"
+      in_block = ($0 ~ expected)
+      next
+    }
+    in_block == 1 {
+      pattern = "^[[:space:]]+" key ":[[:space:]]*"
+      if ($0 ~ pattern) {
+        sub(pattern, "", $0)
+        print $0
+        exit
+      }
+    }
+  ' "$file"
+}
+
+read_json_block_value() {
+  local file="$1"
+  local block="$2"
+  local key="$3"
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const block = process.argv[2];
+    const key = process.argv[3];
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const value = parsed && parsed[block] && parsed[block][key];
+    if (typeof value === "string") process.stdout.write(value);
+  ' "$file" "$block" "$key"
+}
+
+read_config_block_value() {
+  local file="$1"
+  local block="$2"
+  local key="$3"
+  if [ ! -f "$file" ]; then
+    return 0
+  fi
+
+  normalized_file="$(printf '%s' "$file" | tr '[:upper:]' '[:lower:]')"
+  case "$normalized_file" in
+    *.json)
+      read_json_block_value "$file" "$block" "$key"
+      ;;
+    *)
+      trim_config_value "$(read_yaml_block_value "$file" "$block" "$key")"
+      ;;
+  esac
+}
+
+read_control_plane_value() {
+  read_config_block_value "$1" controlPlane "$2"
+}
+
+read_source_value() {
+  read_config_block_value "$1" source "$2"
+}
+
+source_fingerprint_for_action() {
+  local source_locator="$1"
+  local selected_config_path="$2"
+  local base_directory="$3"
+  local selected_preview_id="${4:-}"
+
+  node -e '
+    const sourceLocator = process.argv[1] || ".";
+    const configPath = process.argv[2] || "appaloft.yml";
+    const baseDirectoryInput = process.argv[3] || ".";
+    const previewId = process.argv[4] || "";
+    const env = process.env;
+    function normalizePathSeparators(value) {
+      return String(value || "").trim().replaceAll("\\\\", "/").replace(/\/+/g, "/");
+    }
+    function stripWorkspacePrefix(value, workspaceRoot) {
+      const normalized = normalizePathSeparators(value);
+      const root = workspaceRoot ? normalizePathSeparators(workspaceRoot).replace(/\/+$/, "") : "";
+      if (root && normalized === root) return ".";
+      if (root && normalized.startsWith(`${root}/`)) return normalized.slice(root.length + 1);
+      return normalized;
+    }
+    function normalizeSafeRelativePath(value, fallback, workspaceRoot) {
+      const stripped = stripWorkspacePrefix(value || fallback, workspaceRoot)
+        .replace(/^\.\//, "")
+        .replace(/\/+$/, "");
+      if (!stripped || stripped === ".") return fallback;
+      if (stripped.startsWith("/")) return fallback;
+      return stripped;
+    }
+    function stripGitSuffix(value) {
+      return value.replace(/\.git$/i, "");
+    }
+    function normalizeRepositoryLocator(locator) {
+      const raw = stripGitSuffix(String(locator || "").trim().replace(/\/+$/, ""));
+      const sshMatch = /^git@([^:]+):(.+)$/.exec(raw);
+      if (sshMatch) {
+        const host = (sshMatch[1] || "unknown").toLowerCase();
+        const path = stripGitSuffix(sshMatch[2] || "").replace(/^\/+/, "");
+        return `${host}/${path.toLowerCase()}`;
+      }
+      try {
+        const url = new URL(raw);
+        const host = url.host.toLowerCase();
+        const path = stripGitSuffix(url.pathname.replace(/^\/+/, "").replace(/\/+$/, ""));
+        return `${host}/${host === "github.com" ? path.toLowerCase() : path}`;
+      } catch {
+        return raw.toLowerCase();
+      }
+    }
+    function normalizeBranch(branch) {
+      return String(branch || "").trim().replace(/^refs\/heads\//, "");
+    }
+    function pullRequestNumberFromPreviewId(value) {
+      const normalized = String(value || "").trim().toLowerCase().replace(/^preview-/, "");
+      if (/^\d+$/.test(normalized)) return normalized;
+      const match = /^pr-(\d+)$/.exec(normalized);
+      return match ? match[1] : "";
+    }
+    function scopeKey() {
+      const explicitPreviewNumber = pullRequestNumberFromPreviewId(previewId);
+      if (explicitPreviewNumber) return `preview:pr:${explicitPreviewNumber}`;
+      const pullRequestMatch = /^refs\/pull\/(\d+)\/(?:merge|head)$/.exec(env.GITHUB_REF || "");
+      if (pullRequestMatch) return `preview:pr:${pullRequestMatch[1]}`;
+      if (env.GITHUB_HEAD_REF) return `preview:branch:${normalizeBranch(env.GITHUB_HEAD_REF)}`;
+      if ((env.GITHUB_REF || "").startsWith("refs/heads/")) {
+        return `branch:${normalizeBranch(env.GITHUB_REF)}`;
+      }
+      return "default";
+    }
+    const provider = env.GITHUB_REPOSITORY ? "github" : "local";
+    const repositoryLocator = env.GITHUB_REPOSITORY
+      ? `https://github.com/${env.GITHUB_REPOSITORY}`
+      : sourceLocator;
+    const repository = env.GITHUB_REPOSITORY_ID
+      ? `provider-repository:${env.GITHUB_REPOSITORY_ID}`
+      : normalizeRepositoryLocator(repositoryLocator);
+    const workspaceRoot = env.GITHUB_WORKSPACE || process.cwd();
+    const keyParts = [
+      "source-fingerprint:v1",
+      scopeKey(),
+      provider,
+      repository,
+      normalizeSafeRelativePath(baseDirectoryInput, ".", workspaceRoot),
+      normalizeSafeRelativePath(configPath, "appaloft.yml", workspaceRoot),
+    ];
+    process.stdout.write(keyParts.map(encodeURIComponent).join(":"));
+  ' "$source_locator" "$selected_config_path" "$base_directory" "$selected_preview_id"
+}
+
+require_input() {
+  local name="$1"
+  local value="$2"
+  if [ -z "$value" ]; then
+    error "$name is required for self-hosted control-plane mode"
+    exit 1
+  fi
+}
+
+append_auth_header() {
+  if [ -n "$appaloft_token" ]; then
+    curl_args+=("-H" "Authorization: Bearer ${appaloft_token}")
+  fi
+}
+
+append_step_summary() {
+  if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
+    return 0
+  fi
+
+  {
+    if [ "$wrapper_command" = "preview-cleanup" ]; then
+      printf '### Appaloft preview cleanup\n\n'
+    else
+      printf '### Appaloft deployment\n\n'
+    fi
+    printf -- '- Console: %s\n' "$control_plane_url"
+    if [ -n "${deployment_id:-}" ]; then
+      printf -- '- Deployment: `%s`\n' "$deployment_id"
+    fi
+    if [ -n "${cleanup_status:-}" ]; then
+      printf -- '- Cleanup status: `%s`\n' "$cleanup_status"
+    fi
+  } >> "$GITHUB_STEP_SUMMARY"
+}
+
+pull_request_number_from_context() {
+  local normalized_preview_id
+  normalized_preview_id="$(printf '%s' "$preview_id" | tr '[:upper:]' '[:lower:]')"
+  normalized_preview_id="${normalized_preview_id#preview-}"
+  normalized_preview_id="${normalized_preview_id#pr-}"
+  case "$normalized_preview_id" in
+    ''|*[!0-9]*)
+      ;;
+    *)
+      printf '%s' "$normalized_preview_id"
+      return 0
+      ;;
+  esac
+
+  case "${GITHUB_REF:-}" in
+    refs/pull/*/merge|refs/pull/*/head)
+      local without_prefix="${GITHUB_REF#refs/pull/}"
+      printf '%s' "${without_prefix%%/*}"
+      return 0
+      ;;
+  esac
+
+  printf ''
+}
+
+github_api_url() {
+  local path="$1"
+  printf '%s%s' "${GITHUB_API_URL:-https://api.github.com}" "$path"
+}
+
+build_pr_comment_body() {
+  node -e '
+    const marker = process.argv[1];
+    const command = process.argv[2];
+    const previewId = process.argv[3];
+    const consoleUrl = process.argv[4];
+    const previewUrl = process.argv[5];
+    const deploymentId = process.argv[6];
+    const cleanupStatus = process.argv[7];
+    const lines = [marker, "", command === "preview-cleanup" ? "### Appaloft preview cleanup" : "### Appaloft deployment", ""];
+    if (previewId) lines.push(`- Preview: \`${previewId}\``);
+    if (previewUrl) lines.push(`- Preview URL: ${previewUrl}`);
+    if (consoleUrl) lines.push(`- Console: ${consoleUrl}`);
+    if (deploymentId) lines.push(`- Deployment: \`${deploymentId}\``);
+    if (cleanupStatus) lines.push(`- Cleanup status: \`${cleanupStatus}\``);
+    process.stdout.write(JSON.stringify({ body: `${lines.join("\n")}\n` }));
+  ' "$1" "$wrapper_command" "$preview_id" "${control_plane_url:-}" "${preview_url:-}" "${deployment_id:-}" "${cleanup_status:-}"
+}
+
+maybe_publish_pr_comment() {
+  if ! truthy "$pr_comment"; then
+    return 0
+  fi
+
+  [ -n "${GITHUB_REPOSITORY:-}" ] || { error "pr-comment requires GITHUB_REPOSITORY"; exit 1; }
+  github_token="${input_github_token:-${GITHUB_TOKEN:-}}"
+  [ -n "$github_token" ] || { error "pr-comment requires github-token or GITHUB_TOKEN"; exit 1; }
+
+  pr_number="$(pull_request_number_from_context)"
+  [ -n "$pr_number" ] || { error "pr-comment requires preview-id like pr-123 or a pull_request GitHub ref"; exit 1; }
+
+  comment_marker="<!-- appaloft-deploy-action:${pr_number} -->"
+  comments_path="/repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments"
+
+  if truthy "${APPALOFT_DEPLOY_ACTION_DRY_RUN:-false}"; then
+    if [ -n "${APPALOFT_DEPLOY_ACTION_ARGV_PATH:-}" ]; then
+      printf 'COMMENT %s\n' "$(github_api_url "$comments_path")" >> "$APPALOFT_DEPLOY_ACTION_ARGV_PATH"
+    else
+      printf 'COMMENT %s\n' "$(github_api_url "$comments_path")"
+    fi
+    return 0
+  fi
+
+  comment_payload="$(build_pr_comment_body "$comment_marker")"
+  comments_response="$(curl -fsS \
+    -H "Authorization: Bearer ${github_token}" \
+    -H "Accept: application/vnd.github+json" \
+    "$(github_api_url "${comments_path}?per_page=100")")"
+  comment_id="$(COMMENT_MARKER="$comment_marker" node -e '
+    const fs = require("fs");
+    const comments = JSON.parse(fs.readFileSync(0, "utf8"));
+    const marker = process.env.COMMENT_MARKER;
+    const match = Array.isArray(comments)
+      ? comments.find((comment) => typeof comment.body === "string" && comment.body.includes(marker))
+      : undefined;
+    if (match && match.id !== undefined) process.stdout.write(String(match.id));
+  ' <<EOF
+$comments_response
+EOF
+)"
+
+  if [ -n "$comment_id" ]; then
+    curl -fsS -X PATCH \
+      -H "Authorization: Bearer ${github_token}" \
+      -H "Accept: application/vnd.github+json" \
+      -H "Content-Type: application/json" \
+      --data "$comment_payload" \
+      "$(github_api_url "/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}")" >/dev/null
+  else
+    curl -fsS -X POST \
+      -H "Authorization: Bearer ${github_token}" \
+      -H "Accept: application/vnd.github+json" \
+      -H "Content-Type: application/json" \
+      --data "$comment_payload" \
+      "$(github_api_url "$comments_path")" >/dev/null
+  fi
+}
+
 cleanup_key_file() {
   if [ -n "${generated_key_file:-}" ]; then
     rm -f "$generated_key_file"
@@ -43,19 +385,50 @@ appaloft_bin="${APPALOFT_BIN:-appaloft}"
 wrapper_command="${INPUT_COMMAND:-deploy}"
 source_locator="${INPUT_SOURCE:-.}"
 config_path="${INPUT_CONFIG:-}"
-control_plane_mode="${INPUT_CONTROL_PLANE_MODE:-none}"
+input_control_plane_mode="${INPUT_CONTROL_PLANE_MODE:-}"
+control_plane_mode="$input_control_plane_mode"
 control_plane_url="${INPUT_CONTROL_PLANE_URL:-}"
 appaloft_token="${INPUT_APPALOFT_TOKEN:-}"
 use_oidc="${INPUT_USE_OIDC:-false}"
 ssh_private_key="${INPUT_SSH_PRIVATE_KEY:-}"
 ssh_private_key_file="${INPUT_SSH_PRIVATE_KEY_FILE:-}"
 state_backend="${INPUT_STATE_BACKEND:-}"
+environment_variables="${INPUT_ENVIRONMENT_VARIABLES:-}"
+secret_variables="${INPUT_SECRET_VARIABLES:-}"
 preview="${INPUT_PREVIEW:-}"
 preview_id="${INPUT_PREVIEW_ID:-}"
 preview_domain_template="${INPUT_PREVIEW_DOMAIN_TEMPLATE:-}"
 preview_tls_mode="${INPUT_PREVIEW_TLS_MODE:-}"
 require_preview_url="${INPUT_REQUIRE_PREVIEW_URL:-false}"
+pr_comment="${INPUT_PR_COMMENT:-false}"
+input_github_token="${INPUT_GITHUB_TOKEN:-}"
 preview_output_file=""
+project_id="${INPUT_PROJECT_ID:-}"
+environment_id="${INPUT_ENVIRONMENT_ID:-}"
+resource_id="${INPUT_RESOURCE_ID:-}"
+server_id="${INPUT_SERVER_ID:-}"
+destination_id="${INPUT_DESTINATION_ID:-}"
+
+selected_config_path="$config_path"
+if [ -z "$selected_config_path" ] && [ -f "appaloft.yml" ]; then
+  selected_config_path="appaloft.yml"
+fi
+
+if [ -n "$selected_config_path" ] && [ -f "$selected_config_path" ]; then
+  config_control_plane_mode="$(read_control_plane_value "$selected_config_path" mode)"
+  config_control_plane_url="$(read_control_plane_value "$selected_config_path" url)"
+  if [ -z "$control_plane_mode" ] && [ -n "$config_control_plane_mode" ]; then
+    control_plane_mode="$config_control_plane_mode"
+  fi
+  if [ -z "$control_plane_url" ] && [ -n "$config_control_plane_url" ] && { { [ -z "$input_control_plane_mode" ] && [ -n "$config_control_plane_mode" ]; } || [ "$input_control_plane_mode" = "self-hosted" ] || [ "$input_control_plane_mode" = "cloud" ]; }; then
+    control_plane_url="$config_control_plane_url"
+  fi
+  config_source_base_directory="$(read_source_value "$selected_config_path" baseDirectory)"
+fi
+
+if [ -z "$control_plane_mode" ]; then
+  control_plane_mode="none"
+fi
 
 case "$wrapper_command" in
   ""|deploy)
@@ -72,14 +445,26 @@ esac
 case "$control_plane_mode" in
   ""|none)
     ;;
+  self-hosted)
+    control_plane_mode="self-hosted"
+    ;;
+  cloud|auto)
+    error "control-plane-mode=${control_plane_mode} is not supported by this deploy-action release"
+    exit 1
+    ;;
   *)
-    error "control-plane-mode=${control_plane_mode} is reserved until CLI control-plane handshakes are active"
+    error "Unsupported control-plane-mode: ${control_plane_mode}"
     exit 1
     ;;
 esac
 
-if [ -n "$control_plane_url" ] || [ -n "$appaloft_token" ] || truthy "$use_oidc"; then
-  error "control-plane-url, appaloft-token, and use-oidc are reserved until control-plane mode is active"
+if [ "$control_plane_mode" = "none" ] && { [ -n "$control_plane_url" ] || [ -n "$appaloft_token" ] || truthy "$use_oidc"; }; then
+  error "control-plane-url, appaloft-token, and use-oidc require control-plane-mode=self-hosted"
+  exit 1
+fi
+
+if truthy "$use_oidc"; then
+  error "use-oidc is reserved until GitHub OIDC token exchange is active"
   exit 1
 fi
 
@@ -101,6 +486,110 @@ fi
 if [ -n "$preview" ] && [ "$preview" != "pull-request" ]; then
   error "Unsupported preview mode: $preview"
   exit 1
+fi
+
+if [ "$control_plane_mode" = "self-hosted" ]; then
+  require_input "control-plane-url" "$control_plane_url"
+  has_explicit_deployment_context=false
+  has_any_explicit_context=false
+  if [ -n "$project_id" ] || [ -n "$environment_id" ] || [ -n "$resource_id" ] || [ -n "$server_id" ] || [ -n "$destination_id" ]; then
+    has_any_explicit_context=true
+  fi
+  if [ "$wrapper_command" = "deploy" ] && $has_any_explicit_context; then
+    has_explicit_deployment_context=true
+    require_input "project-id" "$project_id"
+    require_input "environment-id" "$environment_id"
+    require_input "resource-id" "$resource_id"
+    require_input "server-id" "$server_id"
+  fi
+
+  if [ "$wrapper_command" = "preview-cleanup" ] && $has_any_explicit_context; then
+    error "self-hosted preview-cleanup resolves context from source-link state and must not receive project/resource/server ids"
+    exit 1
+  fi
+
+  if [ -n "${INPUT_SSH_HOST:-}" ] || [ -n "${INPUT_SSH_USER:-}" ] || [ -n "${INPUT_SSH_PORT:-}" ] || [ -n "$ssh_private_key" ] || [ -n "$ssh_private_key_file" ] || [ -n "$state_backend" ]; then
+    error "self-hosted control-plane mode must not receive ssh-* inputs or state-backend"
+    exit 1
+  fi
+
+  if [ "$wrapper_command" = "deploy" ] && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url"; }; then
+    error "self-hosted control-plane mode deploys an existing Appaloft resource profile; config, source, runtime-name, and preview inputs are not applied in this slice"
+    exit 1
+  fi
+
+  if [ "$wrapper_command" = "preview-cleanup" ] && { [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url"; }; then
+    error "self-hosted preview-cleanup accepts source, config, preview, and preview-id only"
+    exit 1
+  fi
+
+  control_plane_url="$(normalized_url "$control_plane_url")"
+  curl_args=("-fsS")
+  append_auth_header
+  source_fingerprint="$(source_fingerprint_for_action "$source_locator" "${selected_config_path:-appaloft.yml}" "${config_source_base_directory:-.}" "$preview_id")"
+
+  if truthy "${APPALOFT_DEPLOY_ACTION_DRY_RUN:-false}"; then
+    if [ -n "${APPALOFT_DEPLOY_ACTION_ARGV_PATH:-}" ]; then
+      {
+        printf 'GET %s/api/version\n' "$control_plane_url"
+        if [ "$wrapper_command" = "preview-cleanup" ]; then
+          printf 'POST %s/api/deployments/cleanup-preview\n' "$control_plane_url"
+        else
+          printf 'POST %s/api/action/deployments/from-source-link\n' "$control_plane_url"
+        fi
+      } > "$APPALOFT_DEPLOY_ACTION_ARGV_PATH"
+    else
+      printf 'GET %s/api/version\n' "$control_plane_url"
+      if [ "$wrapper_command" = "preview-cleanup" ]; then
+        printf 'POST %s/api/deployments/cleanup-preview\n' "$control_plane_url"
+      else
+        printf 'POST %s/api/action/deployments/from-source-link\n' "$control_plane_url"
+      fi
+    fi
+  else
+    version_response="$(curl "${curl_args[@]}" "$control_plane_url/api/version")"
+    if [[ "$version_response" != *'"apiVersion":"v1"'* && "$version_response" != *'"apiVersion": "v1"'* ]]; then
+      error "self-hosted control-plane handshake failed: expected apiVersion v1"
+      exit 1
+    fi
+
+    payload="{\"sourceFingerprint\":\"$(json_escape "$source_fingerprint")\""
+    if [ "$wrapper_command" = "deploy" ] && $has_explicit_deployment_context; then
+      payload="${payload},\"projectId\":\"$(json_escape "$project_id")\",\"environmentId\":\"$(json_escape "$environment_id")\",\"resourceId\":\"$(json_escape "$resource_id")\",\"serverId\":\"$(json_escape "$server_id")\""
+      if [ -n "$destination_id" ]; then
+        payload="${payload},\"destinationId\":\"$(json_escape "$destination_id")\""
+      fi
+    fi
+    payload="${payload}}"
+
+    if [ "$wrapper_command" = "preview-cleanup" ]; then
+      cleanup_endpoint="$control_plane_url/api/deployments/cleanup-preview"
+      cleanup_response="$(curl "${curl_args[@]}" -X POST "$cleanup_endpoint" -H "Content-Type: application/json" --data "$payload")"
+      cleanup_status="$(printf '%s\n' "$cleanup_response" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      if [ -z "$cleanup_status" ]; then
+        error "self-hosted control-plane preview cleanup response did not include status"
+        exit 1
+      fi
+      echo "preview-cleanup-status=$cleanup_status" >> "${GITHUB_OUTPUT:-/dev/null}"
+    else
+      deploy_endpoint="$control_plane_url/api/action/deployments/from-source-link"
+      deploy_response="$(curl "${curl_args[@]}" -X POST "$deploy_endpoint" -H "Content-Type: application/json" --data "$payload")"
+      deployment_id="$(printf '%s\n' "$deploy_response" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      if [ -z "$deployment_id" ]; then
+        error "self-hosted control-plane deploy response did not include deployment id"
+        exit 1
+      fi
+      echo "deployment-id=$deployment_id" >> "${GITHUB_OUTPUT:-/dev/null}"
+    fi
+  fi
+
+  if [ "$wrapper_command" = "preview-cleanup" ] && [ -n "$preview_id" ]; then
+    echo "preview-id=$preview_id" >> "${GITHUB_OUTPUT:-/dev/null}"
+  fi
+  echo "console-url=$control_plane_url" >> "${GITHUB_OUTPUT:-/dev/null}"
+  append_step_summary
+  maybe_publish_pr_comment
+  exit 0
 fi
 
 if [ -n "${INPUT_SSH_HOST:-}" ] && [ -z "$state_backend" ]; then
@@ -144,6 +633,8 @@ append_option "--server-provider" "${INPUT_SERVER_PROVIDER:-generic-ssh}"
 append_option "--server-proxy-kind" "${INPUT_SERVER_PROXY_KIND:-}"
 append_option "--server-ssh-private-key-file" "$ssh_private_key_file"
 append_option "--state-backend" "$state_backend"
+append_multiline_option "--env" "$environment_variables"
+append_multiline_option "--secret" "$secret_variables"
 append_option "--preview" "$preview"
 append_option "--preview-id" "$preview_id"
 
@@ -199,3 +690,5 @@ fi
 if [ -n "$preview_url" ]; then
   echo "preview-url=$preview_url" >> "${GITHUB_OUTPUT:-/dev/null}"
 fi
+
+maybe_publish_pr_comment

@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Validate wrapper scripts
-        run: bash -n scripts/install-appaloft.sh scripts/run-deploy.sh
+        run: bash -n scripts/install-appaloft.sh scripts/run-deploy.sh scripts/resolve-control-plane.sh
 
       - name: Validate dry-run preview mapping
         env:
