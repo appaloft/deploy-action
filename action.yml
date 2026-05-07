@@ -143,6 +143,9 @@ outputs:
   deployment-id:
     description: Deployment id accepted by Appaloft.
     value: ${{ steps.deploy.outputs.deployment-id }}
+  deployment-url:
+    description: Self-hosted Appaloft console deployment detail URL when available.
+    value: ${{ steps.deploy.outputs.deployment-url }}
   console-url:
     description: Self-hosted Appaloft console URL used by server API mode.
     value: ${{ steps.deploy.outputs.console-url }}

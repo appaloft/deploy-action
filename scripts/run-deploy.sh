@@ -241,6 +241,17 @@ append_auth_header() {
   fi
 }
 
+deployment_console_url() {
+  local base_url="$1"
+  local deployment="$2"
+  if [ -z "$base_url" ] || [ -z "$deployment" ]; then
+    printf ''
+    return 0
+  fi
+
+  printf '%s/deployments/%s' "${base_url%/}" "$deployment"
+}
+
 append_step_summary() {
   if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
     return 0
@@ -254,7 +265,11 @@ append_step_summary() {
     fi
     printf -- '- Console: %s\n' "$control_plane_url"
     if [ -n "${deployment_id:-}" ]; then
-      printf -- '- Deployment: `%s`\n' "$deployment_id"
+      if [ -n "${deployment_url:-}" ]; then
+        printf -- '- Deployment: [%s](%s)\n' "$deployment_id" "$deployment_url"
+      else
+        printf -- '- Deployment: `%s`\n' "$deployment_id"
+      fi
     fi
     if [ -n "${cleanup_status:-}" ]; then
       printf -- '- Cleanup status: `%s`\n' "$cleanup_status"
@@ -300,15 +315,20 @@ build_pr_comment_body() {
     const consoleUrl = process.argv[4];
     const previewUrl = process.argv[5];
     const deploymentId = process.argv[6];
-    const cleanupStatus = process.argv[7];
+    const deploymentUrl = process.argv[7];
+    const cleanupStatus = process.argv[8];
     const lines = [marker, "", command === "preview-cleanup" ? "### Appaloft preview cleanup" : "### Appaloft deployment", ""];
     if (previewId) lines.push(`- Preview: \`${previewId}\``);
     if (previewUrl) lines.push(`- Preview URL: ${previewUrl}`);
     if (consoleUrl) lines.push(`- Console: ${consoleUrl}`);
-    if (deploymentId) lines.push(`- Deployment: \`${deploymentId}\``);
+    if (deploymentUrl) {
+      lines.push(`- Deployment: [${deploymentId || "Open deployment"}](${deploymentUrl})`);
+    } else if (deploymentId) {
+      lines.push(`- Deployment: \`${deploymentId}\``);
+    }
     if (cleanupStatus) lines.push(`- Cleanup status: \`${cleanupStatus}\``);
     process.stdout.write(JSON.stringify({ body: `${lines.join("\n")}\n` }));
-  ' "$1" "$wrapper_command" "$preview_id" "${control_plane_url:-}" "${preview_url:-}" "${deployment_id:-}" "${cleanup_status:-}"
+  ' "$1" "$wrapper_command" "$preview_id" "${control_plane_url:-}" "${preview_url:-}" "${deployment_id:-}" "${deployment_url:-}" "${cleanup_status:-}"
 }
 
 warn_pr_comment_skipped() {
@@ -592,7 +612,9 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
         error "self-hosted control-plane deploy response did not include deployment id"
         exit 1
       fi
+      deployment_url="$(deployment_console_url "$control_plane_url" "$deployment_id")"
       echo "deployment-id=$deployment_id" >> "${GITHUB_OUTPUT:-/dev/null}"
+      echo "deployment-url=$deployment_url" >> "${GITHUB_OUTPUT:-/dev/null}"
     fi
   fi
 

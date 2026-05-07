@@ -196,9 +196,10 @@ resolves project, environment, resource, and target from existing source-link st
 install or invoke the Appaloft CLI, open SSH, or read or write SSH-server PGlite state.
 
 For `preview: pull-request`, server API mode derives a preview-scoped source fingerprint and calls
-the same deployment endpoint. It writes `preview-id`, `deployment-id`, and `console-url` outputs,
-but it does not apply `preview-domain-template`, `preview-tls-mode`, `require-preview-url`,
-`runtime-name`, `environment-variables`, or `secret-variables` in server mode.
+the same deployment endpoint. It writes `preview-id`, `deployment-id`, `deployment-url`, and
+`console-url` outputs, but it does not apply `preview-domain-template`, `preview-tls-mode`,
+`require-preview-url`, `runtime-name`, `environment-variables`, or `secret-variables` in server
+mode.
 
 ```yaml
 - uses: appaloft/deploy-action@v1
@@ -220,12 +221,14 @@ the trusted `preview` and `preview-id` inputs and calls `POST /api/deployments/c
 Cleanup context is resolved from source-link state; project/resource/server ids are not accepted for
 server-mode preview cleanup.
 
-Server API mode writes the console URL and deployment id to the GitHub step summary when GitHub
-provides `GITHUB_STEP_SUMMARY`. For cleanup it writes the console URL and cleanup status. Workflows
-can also use the `console-url` output for environment URLs or PR comments.
+Server API mode writes the console URL and deployment detail URL to the GitHub step summary when
+GitHub provides `GITHUB_STEP_SUMMARY`. For cleanup it writes the console URL and cleanup status.
+Workflows can also use the `console-url` or `deployment-url` output for environment URLs or PR
+comments.
 
 When `pr-comment: true`, the action posts or updates one stable pull request comment with the
-preview URL, console URL, deployment id, or cleanup status that is available for the selected mode.
+preview URL, console URL, deployment detail URL, or cleanup status that is available for the
+selected mode.
 The workflow must pass `github-token: ${{ github.token }}` and grant `pull-requests: write` or
 `issues: write`. This is entrypoint feedback only; product-grade GitHub App comments/checks remain
 control-plane features. Comment publishing is best-effort: GitHub API permission failures are
@@ -288,6 +291,7 @@ source-link state, or the Appaloft server, not from committed config.
 | `preview-id` | Preview id when preview mode is selected. |
 | `preview-url` | Public preview URL when Appaloft resolves one during deploy. |
 | `deployment-id` | Deployment id accepted by Appaloft. |
+| `deployment-url` | Self-hosted Appaloft console deployment detail URL when available. |
 | `console-url` | Self-hosted Appaloft console URL used by server API mode. |
 | `preview-cleanup-status` | Cleanup status returned by server API mode for `command: preview-cleanup`. |
 
