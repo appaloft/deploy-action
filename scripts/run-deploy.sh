@@ -526,8 +526,8 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
     exit 1
   fi
 
-  if [ "$wrapper_command" = "deploy" ] && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url"; }; then
-    error "self-hosted control-plane mode deploys an existing Appaloft resource profile; config, source, runtime-name, and preview inputs are not applied in this slice"
+  if [ "$wrapper_command" = "deploy" ] && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ] || [ -n "$secret_variables" ]; }; then
+    error "self-hosted control-plane mode deploys an existing Appaloft resource profile; source, runtime/profile, environment, secret, and preview route inputs are not applied in this slice"
     exit 1
   fi
 
@@ -596,7 +596,7 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
     fi
   fi
 
-  if [ "$wrapper_command" = "preview-cleanup" ] && [ -n "$preview_id" ]; then
+  if [ -n "$preview_id" ]; then
     echo "preview-id=$preview_id" >> "${GITHUB_OUTPUT:-/dev/null}"
   fi
   echo "console-url=$control_plane_url" >> "${GITHUB_OUTPUT:-/dev/null}"
