@@ -43,6 +43,31 @@ jobs:
           grep -q '^preview-id=pr-1$' "$tmp/github-output"
           grep -q '^preview-url=http://pr-1.preview.example.com$' "$tmp/github-output"
 
+      - name: Validate dry-run self-hosted preview deploy
+        env:
+          APPALOFT_DEPLOY_ACTION_DRY_RUN: "true"
+          INPUT_CONFIG: appaloft.preview.yml
+          INPUT_CONTROL_PLANE_MODE: self-hosted
+          INPUT_CONTROL_PLANE_URL: https://console.example.com/
+          INPUT_PREVIEW: pull-request
+          INPUT_PREVIEW_ID: pr-1
+          INPUT_PROJECT_ID: prj_console
+          INPUT_ENVIRONMENT_ID: env_preview
+          INPUT_RESOURCE_ID: res_preview
+          INPUT_SERVER_ID: srv_prod
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          export GITHUB_OUTPUT="$tmp/github-output"
+          export APPALOFT_DEPLOY_ACTION_ARGV_PATH="$tmp/argv"
+
+          bash scripts/run-deploy.sh
+
+          grep -q '^GET https://console.example.com/api/version$' "$tmp/argv"
+          grep -q '^POST https://console.example.com/api/action/deployments/from-source-link$' "$tmp/argv"
+          grep -q '^preview-id=pr-1$' "$tmp/github-output"
+          grep -q '^console-url=https://console.example.com$' "$tmp/github-output"
+
       - name: Opt-in exact-version install smoke
         if: ${{ vars.APPALOFT_INSTALL_SMOKE_VERSION != '' }}
         env:

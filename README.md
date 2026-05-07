@@ -158,7 +158,7 @@ deployment history.
 Use this mode when a self-hosted Appaloft server owns deployment state and the repository should
 only trigger a deployment through the server API. The resource profile must already exist in the
 server; this first slice does not apply `appaloft.yml`, upload a source archive, create resources,
-or run preview cleanup.
+or apply preview route/profile inputs from the runner.
 
 ```yaml
 name: Deploy
@@ -195,17 +195,42 @@ them to bootstrap a missing source link before later runs omit ids. When ids are
 resolves project, environment, resource, and target from existing source-link state. It does not
 install or invoke the Appaloft CLI, open SSH, or read or write SSH-server PGlite state.
 
+For `preview: pull-request`, server API mode derives a preview-scoped source fingerprint and calls
+the same deployment endpoint. It writes `preview-id`, `deployment-id`, `deployment-url`, and
+`console-url` outputs, but it does not apply `preview-domain-template`, `preview-tls-mode`,
+`require-preview-url`, `runtime-name`, `environment-variables`, or `secret-variables` in server
+mode.
+
+```yaml
+- uses: appaloft/deploy-action@v1
+  id: deploy
+  with:
+    control-plane-mode: self-hosted
+    control-plane-url: https://console.example.com
+    appaloft-token: ${{ secrets.APPALOFT_TOKEN }}
+    preview: pull-request
+    preview-id: pr-${{ github.event.pull_request.number }}
+    project-id: ${{ secrets.APPALOFT_PROJECT_ID }}
+    environment-id: ${{ secrets.APPALOFT_PREVIEW_ENVIRONMENT_ID }}
+    resource-id: ${{ secrets.APPALOFT_PREVIEW_RESOURCE_ID }}
+    server-id: ${{ secrets.APPALOFT_SERVER_ID }}
+```
+
 For `command: preview-cleanup`, server API mode derives the preview-scoped source fingerprint from
 the trusted `preview` and `preview-id` inputs and calls `POST /api/deployments/cleanup-preview`.
 Cleanup context is resolved from source-link state; project/resource/server ids are not accepted for
 server-mode preview cleanup.
 
-Server API mode writes the console URL and deployment id to the GitHub step summary when GitHub
-provides `GITHUB_STEP_SUMMARY`. For cleanup it writes the console URL and cleanup status. Workflows
-can also use the `console-url` output for environment URLs or PR comments.
+Server API mode writes the console URL and deployment detail URL to the GitHub step summary when
+GitHub provides `GITHUB_STEP_SUMMARY`. When the server response includes a deployment href or URL,
+the action uses that server-provided console target; otherwise it falls back to the standard
+`/deployments/{deploymentId}` console route. For cleanup it writes the console URL and cleanup
+status. Workflows can also use the `console-url` or `deployment-url` output for environment URLs or
+PR comments.
 
 When `pr-comment: true`, the action posts or updates one stable pull request comment with the
-preview URL, console URL, deployment id, or cleanup status that is available for the selected mode.
+preview URL, console URL, deployment detail URL, or cleanup status that is available for the
+selected mode.
 The workflow must pass `github-token: ${{ github.token }}` and grant `pull-requests: write` or
 `issues: write`. This is entrypoint feedback only; product-grade GitHub App comments/checks remain
 control-plane features. Comment publishing is best-effort: GitHub API permission failures are
@@ -268,6 +293,7 @@ source-link state, or the Appaloft server, not from committed config.
 | `preview-id` | Preview id when preview mode is selected. |
 | `preview-url` | Public preview URL when Appaloft resolves one during deploy. |
 | `deployment-id` | Deployment id accepted by Appaloft. |
+| `deployment-url` | Self-hosted Appaloft console deployment detail URL when available. |
 | `console-url` | Self-hosted Appaloft console URL used by server API mode. |
 | `preview-cleanup-status` | Cleanup status returned by server API mode for `command: preview-cleanup`. |
 
@@ -281,9 +307,11 @@ source-link state, or the Appaloft server, not from committed config.
   no control plane is selected.
 - `control-plane-mode: self-hosted` does not accept SSH keys or `state-backend`; the action calls
   the Appaloft server API and leaves state ownership with the server.
-- In self-hosted server API mode, `command: preview-cleanup` accepts only source/config and trusted
-  preview scope inputs. Deployment target ids are intentionally ignored/rejected because cleanup
-  resolves from server-owned source-link state.
+- In self-hosted server API mode, preview deploy accepts trusted `preview` and `preview-id` inputs
+  only for source fingerprinting and feedback outputs. Preview route/profile inputs remain
+  rejected until the server owns that policy. `command: preview-cleanup` accepts only source/config
+  and trusted preview scope inputs. Deployment target ids are intentionally ignored/rejected for
+  cleanup because cleanup resolves from server-owned source-link state.
 - `pr-comment` requires explicit workflow permission and token wiring. The action updates the same
   marker comment for the PR instead of creating a new comment on each run. Comment API failures are
   warnings so they do not mask a successful deployment.
