@@ -222,9 +222,11 @@ Cleanup context is resolved from source-link state; project/resource/server ids 
 server-mode preview cleanup.
 
 Server API mode writes the console URL and deployment detail URL to the GitHub step summary when
-GitHub provides `GITHUB_STEP_SUMMARY`. For cleanup it writes the console URL and cleanup status.
-Workflows can also use the `console-url` or `deployment-url` output for environment URLs or PR
-comments.
+GitHub provides `GITHUB_STEP_SUMMARY`. When the server response includes a deployment href or URL,
+the action uses that server-provided console target; otherwise it falls back to the standard
+`/deployments/{deploymentId}` console route. For cleanup it writes the console URL and cleanup
+status. Workflows can also use the `console-url` or `deployment-url` output for environment URLs or
+PR comments.
 
 When `pr-comment: true`, the action posts or updates one stable pull request comment with the
 preview URL, console URL, deployment detail URL, or cleanup status that is available for the

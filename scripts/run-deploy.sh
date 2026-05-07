@@ -252,6 +252,27 @@ deployment_console_url() {
   printf '%s/deployments/%s' "${base_url%/}" "$deployment"
 }
 
+console_href_url() {
+  local base_url="$1"
+  local href="$2"
+  if [ -z "$href" ]; then
+    printf ''
+    return 0
+  fi
+
+  case "$href" in
+    http://*|https://*)
+      printf '%s' "$href"
+      ;;
+    /*)
+      printf '%s%s' "${base_url%/}" "$href"
+      ;;
+    *)
+      printf '%s/%s' "${base_url%/}" "$href"
+      ;;
+  esac
+}
+
 append_step_summary() {
   if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
     return 0
@@ -612,7 +633,14 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
         error "self-hosted control-plane deploy response did not include deployment id"
         exit 1
       fi
-      deployment_url="$(deployment_console_url "$control_plane_url" "$deployment_id")"
+      deployment_url="$(printf '%s\n' "$deploy_response" | sed -n 's/.*"deploymentUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      deployment_href="$(printf '%s\n' "$deploy_response" | sed -n 's/.*"deploymentHref"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      if [ -z "$deployment_url" ] && [ -n "$deployment_href" ]; then
+        deployment_url="$(console_href_url "$control_plane_url" "$deployment_href")"
+      fi
+      if [ -z "$deployment_url" ]; then
+        deployment_url="$(deployment_console_url "$control_plane_url" "$deployment_id")"
+      fi
       echo "deployment-id=$deployment_id" >> "${GITHUB_OUTPUT:-/dev/null}"
       echo "deployment-url=$deployment_url" >> "${GITHUB_OUTPUT:-/dev/null}"
     fi
