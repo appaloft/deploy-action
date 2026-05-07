@@ -311,6 +311,10 @@ build_pr_comment_body() {
   ' "$1" "$wrapper_command" "$preview_id" "${control_plane_url:-}" "${preview_url:-}" "${deployment_id:-}" "${cleanup_status:-}"
 }
 
+warn_pr_comment_skipped() {
+  echo "::warning::Appaloft PR comment was not published: $1" >&2
+}
+
 maybe_publish_pr_comment() {
   if ! truthy "$pr_comment"; then
     return 0
@@ -336,10 +340,13 @@ maybe_publish_pr_comment() {
   fi
 
   comment_payload="$(build_pr_comment_body "$comment_marker")"
-  comments_response="$(curl -fsS \
+  if ! comments_response="$(curl -fsS \
     -H "Authorization: Bearer ${github_token}" \
     -H "Accept: application/vnd.github+json" \
-    "$(github_api_url "${comments_path}?per_page=100")")"
+    "$(github_api_url "${comments_path}?per_page=100")")"; then
+    warn_pr_comment_skipped "could not list pull request comments"
+    return 0
+  fi
   comment_id="$(COMMENT_MARKER="$comment_marker" node -e '
     const fs = require("fs");
     const comments = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -354,19 +361,25 @@ EOF
 )"
 
   if [ -n "$comment_id" ]; then
-    curl -fsS -X PATCH \
+    if ! curl -fsS -X PATCH \
       -H "Authorization: Bearer ${github_token}" \
       -H "Accept: application/vnd.github+json" \
       -H "Content-Type: application/json" \
       --data "$comment_payload" \
-      "$(github_api_url "/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}")" >/dev/null
+      "$(github_api_url "/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}")" >/dev/null; then
+      warn_pr_comment_skipped "could not update pull request comment"
+      return 0
+    fi
   else
-    curl -fsS -X POST \
+    if ! curl -fsS -X POST \
       -H "Authorization: Bearer ${github_token}" \
       -H "Accept: application/vnd.github+json" \
       -H "Content-Type: application/json" \
       --data "$comment_payload" \
-      "$(github_api_url "$comments_path")" >/dev/null
+      "$(github_api_url "$comments_path")" >/dev/null; then
+      warn_pr_comment_skipped "could not create pull request comment"
+      return 0
+    fi
   fi
 }
 
