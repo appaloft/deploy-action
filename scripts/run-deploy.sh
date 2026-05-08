@@ -54,6 +54,10 @@ json_escape() {
   printf '%s' "$value"
 }
 
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 normalized_url() {
   local value="$1"
   value="${value%/}"
@@ -109,6 +113,73 @@ read_json_block_value() {
   ' "$file" "$block" "$key"
 }
 
+read_yaml_path_value() {
+  local file="$1"
+  local path="$2"
+  awk -v path="$path" '
+    BEGIN {
+      path_length = split(path, path_parts, ".")
+      depth = 0
+    }
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      sub(/^"/, "", value)
+      sub(/"$/, "", value)
+      sub(/^\047/, "", value)
+      sub(/\047$/, "", value)
+      return value
+    }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      line = $0
+      sub(/[[:space:]]+#.*$/, "", line)
+      indent = match(line, /[^[:space:]]/) - 1
+      content = line
+      sub(/^[[:space:]]+/, "", content)
+      separator = index(content, ":")
+      if (separator == 0) next
+
+      key = substr(content, 1, separator - 1)
+      value = trim(substr(content, separator + 1))
+
+      while (depth > 0 && indent <= indent_stack[depth]) {
+        depth--
+      }
+
+      if (key == path_parts[depth + 1]) {
+        depth++
+        indent_stack[depth] = indent
+        if (depth == path_length) {
+          print value
+          exit
+        }
+      }
+    }
+  ' "$file"
+}
+
+read_json_path_value() {
+  local file="$1"
+  local path="$2"
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const path = process.argv[2].split(".");
+    let value = JSON.parse(fs.readFileSync(file, "utf8"));
+    for (const part of path) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        value = undefined;
+        break;
+      }
+      value = value[part];
+    }
+    if (["string", "number", "boolean"].includes(typeof value)) {
+      process.stdout.write(String(value));
+    }
+  ' "$file" "$path"
+}
+
 read_config_block_value() {
   local file="$1"
   local block="$2"
@@ -128,8 +199,30 @@ read_config_block_value() {
   esac
 }
 
+read_config_path_value() {
+  local file="$1"
+  local path="$2"
+  if [ ! -f "$file" ]; then
+    return 0
+  fi
+
+  normalized_file="$(printf '%s' "$file" | tr '[:upper:]' '[:lower:]')"
+  case "$normalized_file" in
+    *.json)
+      read_json_path_value "$file" "$path"
+      ;;
+    *)
+      trim_config_value "$(read_yaml_path_value "$file" "$path")"
+      ;;
+  esac
+}
+
 read_control_plane_value() {
   read_config_block_value "$1" controlPlane "$2"
+}
+
+read_control_plane_install_value() {
+  read_config_path_value "$1" "controlPlane.install.$2"
 }
 
 read_source_value() {
@@ -273,18 +366,179 @@ console_href_url() {
   esac
 }
 
+version_supports_action_server_config_deploy() {
+  node -e '
+    const fs = require("fs");
+    const input = fs.readFileSync(0, "utf8");
+    const parsed = JSON.parse(input);
+    const features = parsed && typeof parsed.features === "object" && parsed.features
+      ? parsed.features
+      : {};
+    const supported =
+      parsed.actionServerConfigDeploy === true ||
+      features.actionServerConfigDeploy === true ||
+      (
+        (features.sourcePackage === true || features.sourcePackages === true) &&
+        features.serverSideConfigBootstrap === true
+      );
+    process.exit(supported ? 0 : 1);
+  '
+}
+
+resolved_secrets_payload_for_action() {
+  APPALOFT_ACTION_SECRET_VARIABLES="$secret_variables" node -e '
+    const input = process.env.APPALOFT_ACTION_SECRET_VARIABLES || "";
+    const resolvedSecrets = {};
+
+    function fail(message, details = {}) {
+      const suffix = Object.entries(details)
+        .filter(([, value]) => value)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(" ");
+      console.error(`::error::${message}${suffix ? ` (${suffix})` : ""}`);
+      process.exit(1);
+    }
+
+    for (const rawLine of input.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      const separatorIndex = line.indexOf("=");
+      const key = separatorIndex >= 0 ? line.slice(0, separatorIndex).trim() : line;
+      const reference = separatorIndex >= 0 ? line.slice(separatorIndex + 1).trim() : `ci-env:${key}`;
+      if (!key || !reference) {
+        fail("server-config-deploy secret-variables must use KEY=ci-env:NAME syntax");
+      }
+      if (!reference.startsWith("ci-env:")) {
+        fail("server-config-deploy secret-variables only supports ci-env references", {
+          secretKey: key,
+          secretRef: reference,
+        });
+      }
+
+      const envName = reference.slice("ci-env:".length).trim();
+      if (!envName) {
+        fail("server-config-deploy secret-variables ci-env reference is missing an environment name", {
+          secretKey: key,
+          secretRef: reference,
+        });
+      }
+      if (process.env[envName] === undefined) {
+        fail("server-config-deploy required secret was not found in the runner environment", {
+          secretKey: key,
+          secretRef: reference,
+        });
+      }
+
+      resolvedSecrets[envName] = process.env[envName];
+    }
+
+    if (Object.keys(resolvedSecrets).length > 0) {
+      process.stdout.write(`,"resolvedSecrets":${JSON.stringify(resolvedSecrets)}`);
+    }
+  '
+}
+
+post_json() {
+  local endpoint="$1"
+  local payload="$2"
+  local payload_file
+  local status
+
+  payload_file="$(mktemp "${RUNNER_TEMP:-/tmp}/appaloft-payload.XXXXXX")"
+  chmod 600 "$payload_file"
+  printf '%s' "$payload" > "$payload_file"
+  set +e
+  curl "${curl_args[@]}" -X POST "$endpoint" -H "Content-Type: application/json" --data-binary "@$payload_file"
+  status=$?
+  set -e
+  rm -f "$payload_file"
+  return "$status"
+}
+
+source_package_payload_for_action() {
+  local source_fingerprint="$1"
+  local selected_config="$2"
+  local source_root="$3"
+  local payload
+  local resolved_secrets_payload
+
+  payload="{\"sourceFingerprint\":\"$(json_escape "$source_fingerprint")\",\"configPath\":\"$(json_escape "$selected_config")\",\"sourceRoot\":\"$(json_escape "$source_root")\",\"sourcePackage\":{\"transport\":\"server-github-fetch\",\"sourceFingerprint\":\"$(json_escape "$source_fingerprint")\",\"configPath\":\"$(json_escape "$selected_config")\",\"sourceRoot\":\"$(json_escape "$source_root")\""
+  if [ -n "${GITHUB_SHA:-}" ]; then
+    payload="${payload},\"revision\":\"$(json_escape "$GITHUB_SHA")\""
+  fi
+  if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    payload="${payload},\"repositoryFullName\":\"$(json_escape "$GITHUB_REPOSITORY")\""
+  fi
+  if [ -n "${GITHUB_REPOSITORY_ID:-}" ]; then
+    payload="${payload},\"repositoryId\":\"$(json_escape "$GITHUB_REPOSITORY_ID")\""
+  fi
+  payload="${payload}}"
+  if [ -n "$project_id" ] || [ -n "$environment_id" ] || [ -n "$resource_id" ] || [ -n "$server_id" ] || [ -n "$destination_id" ] || [ -n "${GITHUB_REPOSITORY:-}" ] || [ -n "${GITHUB_REPOSITORY_ID:-}" ] || [ -n "${GITHUB_REF:-}" ] || [ -n "${GITHUB_SHA:-}" ]; then
+    payload="${payload},\"trustedContext\":{"
+    local separator=""
+    if [ -n "$project_id" ]; then payload="${payload}${separator}\"projectId\":\"$(json_escape "$project_id")\""; separator=","; fi
+    if [ -n "$environment_id" ]; then payload="${payload}${separator}\"environmentId\":\"$(json_escape "$environment_id")\""; separator=","; fi
+    if [ -n "$resource_id" ]; then payload="${payload}${separator}\"resourceId\":\"$(json_escape "$resource_id")\""; separator=","; fi
+    if [ -n "$server_id" ]; then payload="${payload}${separator}\"serverId\":\"$(json_escape "$server_id")\""; separator=","; fi
+    if [ -n "$destination_id" ]; then payload="${payload}${separator}\"destinationId\":\"$(json_escape "$destination_id")\""; separator=","; fi
+    if [ -n "${GITHUB_REPOSITORY:-}" ]; then payload="${payload}${separator}\"repositoryFullName\":\"$(json_escape "$GITHUB_REPOSITORY")\""; separator=","; fi
+    if [ -n "${GITHUB_REPOSITORY_ID:-}" ]; then payload="${payload}${separator}\"repositoryId\":\"$(json_escape "$GITHUB_REPOSITORY_ID")\""; separator=","; fi
+    if [ -n "${GITHUB_REF:-}" ]; then payload="${payload}${separator}\"ref\":\"$(json_escape "$GITHUB_REF")\""; separator=","; fi
+    if [ -n "${GITHUB_SHA:-}" ]; then payload="${payload}${separator}\"revision\":\"$(json_escape "$GITHUB_SHA")\""; fi
+    payload="${payload}}"
+  fi
+  if [ "$preview" = "pull-request" ]; then
+    payload="${payload},\"preview\":{\"kind\":\"pull-request\",\"previewId\":\"$(json_escape "$preview_id")\""
+    local pr_number
+    pr_number="$(pull_request_number_from_context)"
+    if [ -n "$pr_number" ]; then
+      payload="${payload},\"pullRequestNumber\":${pr_number}"
+    fi
+    if [ -n "${GITHUB_SHA:-}" ]; then
+      payload="${payload},\"headSha\":\"$(json_escape "$GITHUB_SHA")\""
+    fi
+    if [ -n "${GITHUB_BASE_REF:-}" ]; then
+      payload="${payload},\"baseRef\":\"$(json_escape "$GITHUB_BASE_REF")\""
+    fi
+    if [ -n "${GITHUB_HEAD_REF:-}" ]; then
+      payload="${payload},\"headRef\":\"$(json_escape "$GITHUB_HEAD_REF")\""
+    fi
+    payload="${payload}}"
+  fi
+  if ! resolved_secrets_payload="$(resolved_secrets_payload_for_action)"; then
+    return 1
+  fi
+  payload="${payload}${resolved_secrets_payload}"
+  payload="${payload}}"
+  printf '%s' "$payload"
+}
+
 append_step_summary() {
   if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
     return 0
   fi
 
   {
-    if [ "$wrapper_command" = "preview-cleanup" ]; then
-      printf '### Appaloft preview cleanup\n\n'
-    else
-      printf '### Appaloft deployment\n\n'
+    case "$wrapper_command" in
+      preview-cleanup)
+        printf '### Appaloft preview cleanup\n\n'
+        ;;
+      install-console)
+        printf '### Appaloft console install\n\n'
+        ;;
+      *)
+        printf '### Appaloft deployment\n\n'
+        ;;
+    esac
+    if [ -n "${control_plane_url:-}" ]; then
+      printf -- '- Console: %s\n' "$control_plane_url"
+    elif [ -n "${console_url:-}" ]; then
+      printf -- '- Console: %s\n' "$console_url"
     fi
-    printf -- '- Console: %s\n' "$control_plane_url"
+    if [ "$wrapper_command" = "install-console" ] && [ -n "${console_database:-}" ]; then
+      printf -- '- Database: `%s`\n' "$console_database"
+    fi
     if [ -n "${deployment_id:-}" ]; then
       if [ -n "${deployment_url:-}" ]; then
         printf -- '- Deployment: [%s](%s)\n' "$deployment_id" "$deployment_url"
@@ -296,6 +550,151 @@ append_step_summary() {
       printf -- '- Cleanup status: `%s`\n' "$cleanup_status"
     fi
   } >> "$GITHUB_STEP_SUMMARY"
+}
+
+console_installer_url_for_version() {
+  local version="$1"
+  local normalized_version
+
+  if [ -n "$console_installer_url" ]; then
+    printf '%s' "$console_installer_url"
+    return 0
+  fi
+
+  if [ -z "$version" ] || [ "$version" = "latest" ]; then
+    printf 'https://github.com/appaloft/appaloft/releases/latest/download/install.sh'
+    return 0
+  fi
+
+  case "$version" in
+    v*) normalized_version="$version" ;;
+    *) normalized_version="v$version" ;;
+  esac
+  printf 'https://github.com/appaloft/appaloft/releases/download/%s/install.sh' "$normalized_version"
+}
+
+validate_console_install_inputs() {
+  case "$console_database" in
+    postgres|pglite)
+      ;;
+    *)
+      error "console-database must be postgres or pglite"
+      exit 1
+      ;;
+  esac
+
+  case "$console_orchestrator" in
+    compose|swarm)
+      ;;
+    *)
+      error "console-orchestrator must be compose or swarm"
+      exit 1
+      ;;
+  esac
+
+  case "$console_http_port" in
+    ''|*[!0-9]*)
+      error "console-http-port must be a positive integer"
+      exit 1
+      ;;
+    *)
+      if [ "$console_http_port" -le 0 ]; then
+        error "console-http-port must be a positive integer"
+        exit 1
+      fi
+      ;;
+  esac
+}
+
+run_console_install() {
+  local ssh_host="${INPUT_SSH_HOST:-}"
+  local ssh_user="${INPUT_SSH_USER:-root}"
+  local ssh_port="${INPUT_SSH_PORT:-22}"
+  local installer_url
+  local remote_command
+  local install_args
+  local ssh_args
+
+  [ -n "$ssh_host" ] || { error "ssh-host is required for command=install-console"; exit 1; }
+
+  case "$ssh_port" in
+    ''|*[!0-9]*)
+      error "ssh-port must be numeric for command=install-console"
+      exit 1
+      ;;
+  esac
+
+  validate_console_install_inputs
+
+  if [ -z "$console_url" ]; then
+    if [ -n "$console_domain" ]; then
+      console_url="https://${console_domain}"
+    else
+      console_url="http://${ssh_host}:${console_http_port}"
+    fi
+  fi
+  console_url="$(normalized_url "$console_url")"
+  installer_url="$(console_installer_url_for_version "$input_version")"
+
+  install_args="--version $(shell_quote "$input_version") --web-origin $(shell_quote "$console_url") --database $(shell_quote "$console_database") --orchestrator $(shell_quote "$console_orchestrator") --host $(shell_quote "$console_http_host") --port $(shell_quote "$console_http_port") --image $(shell_quote "$console_image")"
+  if [ -n "$console_install_dir" ]; then
+    install_args="$install_args --home $(shell_quote "$console_install_dir")"
+  fi
+  if [ "$console_orchestrator" = "compose" ] && [ -n "$console_compose_project_name" ]; then
+    install_args="$install_args --project-name $(shell_quote "$console_compose_project_name")"
+  fi
+  if [ "$console_orchestrator" = "swarm" ] && [ -n "$console_swarm_stack_name" ]; then
+    install_args="$install_args --stack-name $(shell_quote "$console_swarm_stack_name")"
+  fi
+  if [ "$console_orchestrator" = "swarm" ] && truthy "$console_swarm_init"; then
+    install_args="$install_args --swarm-init"
+  fi
+  if [ "$console_orchestrator" = "swarm" ] && [ -n "$console_swarm_advertise_addr" ]; then
+    install_args="$install_args --swarm-advertise-addr $(shell_quote "$console_swarm_advertise_addr")"
+  fi
+  if truthy "$console_skip_docker_install"; then
+    install_args="$install_args --skip-docker-install"
+  fi
+
+  if truthy "${APPALOFT_DEPLOY_ACTION_DRY_RUN:-false}"; then
+    if [ -n "${APPALOFT_DEPLOY_ACTION_ARGV_PATH:-}" ]; then
+      {
+        printf 'SSH %s@%s:%s\n' "$ssh_user" "$ssh_host" "$ssh_port"
+        printf 'INSTALLER %s\n' "$installer_url"
+        printf 'RUN sh /tmp/appaloft-install.sh %s\n' "$install_args"
+        printf 'HEALTH %s/api/health\n' "$console_url"
+      } > "$APPALOFT_DEPLOY_ACTION_ARGV_PATH"
+    else
+      printf 'SSH %s@%s:%s\n' "$ssh_user" "$ssh_host" "$ssh_port"
+      printf 'INSTALLER %s\n' "$installer_url"
+      printf 'RUN sh /tmp/appaloft-install.sh %s\n' "$install_args"
+      printf 'HEALTH %s/api/health\n' "$console_url"
+    fi
+    echo "console-url=$console_url" >> "${GITHUB_OUTPUT:-/dev/null}"
+    append_step_summary
+    return 0
+  fi
+
+  ssh_args=(-p "$ssh_port" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30)
+  if [ -n "$ssh_private_key_file" ]; then
+    ssh_args=(-i "$ssh_private_key_file" "${ssh_args[@]}")
+  fi
+
+  remote_command="if command -v curl >/dev/null 2>&1; then curl -fsSL $(shell_quote "$installer_url") -o /tmp/appaloft-install.sh; elif command -v wget >/dev/null 2>&1; then wget -qO /tmp/appaloft-install.sh $(shell_quote "$installer_url"); else echo 'curl or wget is required to download Appaloft installer' >&2; exit 1; fi; chmod 700 /tmp/appaloft-install.sh; sh /tmp/appaloft-install.sh $install_args"
+
+  ssh "${ssh_args[@]}" "$ssh_user@$ssh_host" "$remote_command"
+
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS "$console_url/api/health" >/dev/null; then
+      echo "console-url=$console_url" >> "${GITHUB_OUTPUT:-/dev/null}"
+      append_step_summary
+      return 0
+    fi
+    sleep 6
+  done
+
+  error "Appaloft console did not become healthy at $console_url/api/health"
+  exit 1
 }
 
 pull_request_number_from_context() {
@@ -437,6 +836,7 @@ trap cleanup_key_file EXIT
 
 appaloft_bin="${APPALOFT_BIN:-appaloft}"
 wrapper_command="${INPUT_COMMAND:-deploy}"
+input_version="${INPUT_VERSION:-latest}"
 source_locator="${INPUT_SOURCE:-.}"
 config_path="${INPUT_CONFIG:-}"
 input_control_plane_mode="${INPUT_CONTROL_PLANE_MODE:-}"
@@ -444,8 +844,23 @@ control_plane_mode="$input_control_plane_mode"
 control_plane_url="${INPUT_CONTROL_PLANE_URL:-}"
 appaloft_token="${INPUT_APPALOFT_TOKEN:-}"
 use_oidc="${INPUT_USE_OIDC:-false}"
+server_config_deploy="${INPUT_SERVER_CONFIG_DEPLOY:-false}"
 ssh_private_key="${INPUT_SSH_PRIVATE_KEY:-}"
 ssh_private_key_file="${INPUT_SSH_PRIVATE_KEY_FILE:-}"
+console_url="${INPUT_CONSOLE_URL:-}"
+console_domain="${INPUT_CONSOLE_DOMAIN:-}"
+console_database="${INPUT_CONSOLE_DATABASE:-}"
+console_orchestrator="${INPUT_CONSOLE_ORCHESTRATOR:-}"
+console_http_host="${INPUT_CONSOLE_HTTP_HOST:-}"
+console_http_port="${INPUT_CONSOLE_HTTP_PORT:-}"
+console_install_dir="${INPUT_CONSOLE_INSTALL_DIR:-}"
+console_compose_project_name="${INPUT_CONSOLE_COMPOSE_PROJECT_NAME:-}"
+console_swarm_stack_name="${INPUT_CONSOLE_SWARM_STACK_NAME:-}"
+console_swarm_init="${INPUT_CONSOLE_SWARM_INIT:-}"
+console_swarm_advertise_addr="${INPUT_CONSOLE_SWARM_ADVERTISE_ADDR:-}"
+console_image="${INPUT_CONSOLE_IMAGE:-}"
+console_installer_url="${INPUT_CONSOLE_INSTALLER_URL:-}"
+console_skip_docker_install="${INPUT_CONSOLE_SKIP_DOCKER_INSTALL:-}"
 state_backend="${INPUT_STATE_BACKEND:-}"
 environment_variables="${INPUT_ENVIRONMENT_VARIABLES:-}"
 secret_variables="${INPUT_SECRET_VARIABLES:-}"
@@ -478,11 +893,44 @@ if [ -n "$selected_config_path" ] && [ -f "$selected_config_path" ]; then
     control_plane_url="$config_control_plane_url"
   fi
   config_source_base_directory="$(read_source_value "$selected_config_path" baseDirectory)"
+  config_console_url="$(read_control_plane_install_value "$selected_config_path" url)"
+  config_console_domain="$(read_control_plane_install_value "$selected_config_path" domain)"
+  config_console_database="$(read_control_plane_install_value "$selected_config_path" database)"
+  config_console_orchestrator="$(read_control_plane_install_value "$selected_config_path" orchestrator)"
+  config_console_http_host="$(read_control_plane_install_value "$selected_config_path" httpHost)"
+  config_console_http_port="$(read_control_plane_install_value "$selected_config_path" httpPort)"
+  config_console_install_dir="$(read_control_plane_install_value "$selected_config_path" installDir)"
+  config_console_compose_project_name="$(read_control_plane_install_value "$selected_config_path" composeProjectName)"
+  config_console_swarm_stack_name="$(read_control_plane_install_value "$selected_config_path" swarmStackName)"
+  config_console_swarm_init="$(read_control_plane_install_value "$selected_config_path" swarmInit)"
+  config_console_swarm_advertise_addr="$(read_control_plane_install_value "$selected_config_path" swarmAdvertiseAddr)"
+  config_console_image="$(read_control_plane_install_value "$selected_config_path" image)"
+  config_console_installer_url="$(read_control_plane_install_value "$selected_config_path" installerUrl)"
+  config_console_skip_docker_install="$(read_control_plane_install_value "$selected_config_path" skipDockerInstall)"
 fi
 
 if [ -z "$control_plane_mode" ]; then
   control_plane_mode="none"
 fi
+
+if [ -z "$console_url" ]; then
+  console_url="${config_console_url:-${config_control_plane_url:-}}"
+fi
+if [ -z "$console_domain" ]; then
+  console_domain="${config_console_domain:-}"
+fi
+console_database="${console_database:-${config_console_database:-pglite}}"
+console_orchestrator="${console_orchestrator:-${config_console_orchestrator:-compose}}"
+console_http_host="${console_http_host:-${config_console_http_host:-0.0.0.0}}"
+console_http_port="${console_http_port:-${config_console_http_port:-3001}}"
+console_install_dir="${console_install_dir:-${config_console_install_dir:-}}"
+console_compose_project_name="${console_compose_project_name:-${config_console_compose_project_name:-appaloft}}"
+console_swarm_stack_name="${console_swarm_stack_name:-${config_console_swarm_stack_name:-appaloft}}"
+console_swarm_init="${console_swarm_init:-${config_console_swarm_init:-false}}"
+console_swarm_advertise_addr="${console_swarm_advertise_addr:-${config_console_swarm_advertise_addr:-}}"
+console_image="${console_image:-${config_console_image:-ghcr.io/appaloft/appaloft}}"
+console_installer_url="${console_installer_url:-${config_console_installer_url:-}}"
+console_skip_docker_install="${console_skip_docker_install:-${config_console_skip_docker_install:-false}}"
 
 case "$wrapper_command" in
   ""|deploy)
@@ -490,11 +938,30 @@ case "$wrapper_command" in
     ;;
   preview-cleanup)
     ;;
+  install-console)
+    ;;
   *)
     error "Unsupported deploy-action command: $wrapper_command"
     exit 1
     ;;
 esac
+
+if [ -n "$ssh_private_key" ] && [ -n "$ssh_private_key_file" ]; then
+  error "ssh-private-key and ssh-private-key-file are mutually exclusive"
+  exit 1
+fi
+
+if [ -n "$ssh_private_key" ]; then
+  generated_key_file="$(mktemp "${RUNNER_TEMP:-/tmp}/appaloft-ssh-key.XXXXXX")"
+  printf '%s\n' "$ssh_private_key" > "$generated_key_file"
+  chmod 600 "$generated_key_file"
+  ssh_private_key_file="$generated_key_file"
+fi
+
+if [ "$wrapper_command" = "install-console" ]; then
+  run_console_install
+  exit 0
+fi
 
 case "$control_plane_mode" in
   ""|none)
@@ -522,8 +989,8 @@ if truthy "$use_oidc"; then
   exit 1
 fi
 
-if [ -n "$ssh_private_key" ] && [ -n "$ssh_private_key_file" ]; then
-  error "ssh-private-key and ssh-private-key-file are mutually exclusive"
+if truthy "$server_config_deploy" && { [ "$control_plane_mode" != "self-hosted" ] || [ "$wrapper_command" != "deploy" ]; }; then
+  error "server-config-deploy requires control-plane-mode=self-hosted and command=deploy"
   exit 1
 fi
 
@@ -567,8 +1034,13 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
     exit 1
   fi
 
-  if [ "$wrapper_command" = "deploy" ] && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ] || [ -n "$secret_variables" ]; }; then
+  if [ "$wrapper_command" = "deploy" ] && ! truthy "$server_config_deploy" && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ] || [ -n "$secret_variables" ]; }; then
     error "self-hosted control-plane mode deploys an existing Appaloft resource profile; source, runtime/profile, environment, secret, and preview route inputs are not applied in this slice"
+    exit 1
+  fi
+
+  if truthy "$server_config_deploy" && { [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ]; }; then
+    error "server-config-deploy hands source/config to the self-hosted server and does not accept runner-side profile, env, or preview route inputs"
     exit 1
   fi
 
@@ -588,6 +1060,8 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
         printf 'GET %s/api/version\n' "$control_plane_url"
         if [ "$wrapper_command" = "preview-cleanup" ]; then
           printf 'POST %s/api/deployments/cleanup-preview\n' "$control_plane_url"
+        elif truthy "$server_config_deploy"; then
+          printf 'POST %s/api/action/deployments/from-config-package\n' "$control_plane_url"
         else
           printf 'POST %s/api/action/deployments/from-source-link\n' "$control_plane_url"
         fi
@@ -596,6 +1070,8 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
       printf 'GET %s/api/version\n' "$control_plane_url"
       if [ "$wrapper_command" = "preview-cleanup" ]; then
         printf 'POST %s/api/deployments/cleanup-preview\n' "$control_plane_url"
+      elif truthy "$server_config_deploy"; then
+        printf 'POST %s/api/action/deployments/from-config-package\n' "$control_plane_url"
       else
         printf 'POST %s/api/action/deployments/from-source-link\n' "$control_plane_url"
       fi
@@ -604,6 +1080,11 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
     version_response="$(curl "${curl_args[@]}" "$control_plane_url/api/version")"
     if [[ "$version_response" != *'"apiVersion":"v1"'* && "$version_response" != *'"apiVersion": "v1"'* ]]; then
       error "self-hosted control-plane handshake failed: expected apiVersion v1"
+      exit 1
+    fi
+
+    if truthy "$server_config_deploy" && ! printf '%s' "$version_response" | version_supports_action_server_config_deploy; then
+      error "self-hosted control-plane does not support Action Server Config Deploy; missing sourcePackage/serverSideConfigBootstrap feature"
       exit 1
     fi
 
@@ -618,7 +1099,7 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
 
     if [ "$wrapper_command" = "preview-cleanup" ]; then
       cleanup_endpoint="$control_plane_url/api/deployments/cleanup-preview"
-      cleanup_response="$(curl "${curl_args[@]}" -X POST "$cleanup_endpoint" -H "Content-Type: application/json" --data "$payload")"
+      cleanup_response="$(post_json "$cleanup_endpoint" "$payload")"
       cleanup_status="$(printf '%s\n' "$cleanup_response" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
       if [ -z "$cleanup_status" ]; then
         error "self-hosted control-plane preview cleanup response did not include status"
@@ -626,8 +1107,13 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
       fi
       echo "preview-cleanup-status=$cleanup_status" >> "${GITHUB_OUTPUT:-/dev/null}"
     else
-      deploy_endpoint="$control_plane_url/api/action/deployments/from-source-link"
-      deploy_response="$(curl "${curl_args[@]}" -X POST "$deploy_endpoint" -H "Content-Type: application/json" --data "$payload")"
+      if truthy "$server_config_deploy"; then
+        deploy_endpoint="$control_plane_url/api/action/deployments/from-config-package"
+        payload="$(source_package_payload_for_action "$source_fingerprint" "${selected_config_path:-appaloft.yml}" "${config_source_base_directory:-.}")"
+      else
+        deploy_endpoint="$control_plane_url/api/action/deployments/from-source-link"
+      fi
+      deploy_response="$(post_json "$deploy_endpoint" "$payload")"
       deployment_id="$(printf '%s\n' "$deploy_response" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
       if [ -z "$deployment_id" ]; then
         error "self-hosted control-plane deploy response did not include deployment id"
@@ -657,13 +1143,6 @@ fi
 
 if [ -n "${INPUT_SSH_HOST:-}" ] && [ -z "$state_backend" ]; then
   state_backend="ssh-pglite"
-fi
-
-if [ -n "$ssh_private_key" ]; then
-  generated_key_file="$(mktemp "${RUNNER_TEMP:-/tmp}/appaloft-ssh-key.XXXXXX")"
-  printf '%s\n' "$ssh_private_key" > "$generated_key_file"
-  chmod 600 "$generated_key_file"
-  ssh_private_key_file="$generated_key_file"
 fi
 
 if [ -n "$preview" ] && [ "$wrapper_command" = "deploy" ]; then

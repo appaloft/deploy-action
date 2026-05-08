@@ -3,11 +3,11 @@ description: Run an Appaloft deployment from GitHub Actions through pure SSH CLI
 
 inputs:
   command:
-    description: Wrapper command to run. Use deploy for deployments or preview-cleanup for pull request cleanup.
+    description: Wrapper command to run. Use deploy for deployments, preview-cleanup for pull request cleanup, or install-console to install or upgrade a self-hosted console over SSH.
     required: false
     default: deploy
   version:
-    description: Appaloft CLI release tag, for example v0.9.0. Use latest for the latest stable release.
+    description: Appaloft release tag, for example v0.9.0. Use latest for the latest stable release.
     required: false
     default: latest
   config:
@@ -42,6 +42,62 @@ inputs:
     description: Existing runner-local SSH private key file.
     required: false
     default: ""
+  console-url:
+    description: Public self-hosted console origin configured during command=install-console. Defaults to https://<console-domain> or http://<ssh-host>:<console-http-port>.
+    required: false
+    default: ""
+  console-domain:
+    description: Public self-hosted console domain used to derive https://<domain> when console-url is empty.
+    required: false
+    default: ""
+  console-database:
+    description: Self-hosted console database backend for command=install-console. Defaults to controlPlane.install.database or pglite.
+    required: false
+    default: ""
+  console-orchestrator:
+    description: Self-hosted console Docker orchestrator for command=install-console. Defaults to controlPlane.install.orchestrator or compose.
+    required: false
+    default: ""
+  console-http-host:
+    description: Host bind address passed to the self-hosted console installer. Defaults to controlPlane.install.httpHost or 0.0.0.0.
+    required: false
+    default: ""
+  console-http-port:
+    description: Host HTTP port passed to the self-hosted console installer. Defaults to controlPlane.install.httpPort or 3001.
+    required: false
+    default: ""
+  console-install-dir:
+    description: Remote install directory passed to the self-hosted console installer. Defaults to the installer default.
+    required: false
+    default: ""
+  console-compose-project-name:
+    description: Docker Compose project name passed to the self-hosted console installer. Defaults to controlPlane.install.composeProjectName or appaloft.
+    required: false
+    default: ""
+  console-swarm-stack-name:
+    description: Docker Swarm stack name passed to the self-hosted console installer. Defaults to controlPlane.install.swarmStackName or appaloft.
+    required: false
+    default: ""
+  console-swarm-init:
+    description: Initialize a single-node Swarm manager on the SSH host when command=install-console and console-orchestrator=swarm. Defaults to controlPlane.install.swarmInit or false.
+    required: false
+    default: ""
+  console-swarm-advertise-addr:
+    description: Optional advertise address passed to docker swarm init for command=install-console.
+    required: false
+    default: ""
+  console-image:
+    description: Appaloft console image repository or full image reference passed to the self-hosted console installer. Defaults to controlPlane.install.image or ghcr.io/appaloft/appaloft.
+    required: false
+    default: ""
+  console-installer-url:
+    description: Override URL for the self-hosted install.sh script used by command=install-console.
+    required: false
+    default: ""
+  console-skip-docker-install:
+    description: Require Docker Engine to already exist on the SSH host when command=install-console. Defaults to controlPlane.install.skipDockerInstall or false.
+    required: false
+    default: ""
   server-provider:
     description: Server provider key.
     required: false
@@ -59,7 +115,7 @@ inputs:
     required: false
     default: ""
   secret-variables:
-    description: Newline-separated secret variables passed as repeated CLI --secret values in pure CLI mode.
+    description: Newline-separated secret variables passed as repeated CLI --secret values in pure CLI mode, or resolved as ci-env secrets for server-config-deploy.
     required: false
     default: ""
   preview:
@@ -106,6 +162,10 @@ inputs:
     description: Future GitHub OIDC exchange toggle. Not yet supported.
     required: false
     default: "false"
+  server-config-deploy:
+    description: Experimental self-hosted server config deploy mode. Requires server-side source package and config bootstrap support.
+    required: false
+    default: "false"
   project-id:
     description: Trusted Appaloft project id for self-hosted server API mode.
     required: false
@@ -147,7 +207,7 @@ outputs:
     description: Self-hosted Appaloft console deployment detail URL when available.
     value: ${{ steps.deploy.outputs.deployment-url }}
   console-url:
-    description: Self-hosted Appaloft console URL used by server API mode.
+    description: Self-hosted Appaloft console URL installed by install-console or used by server API mode.
     value: ${{ steps.deploy.outputs.console-url }}
   preview-cleanup-status:
     description: Preview cleanup status when command is preview-cleanup.
@@ -165,7 +225,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/scripts/resolve-control-plane.sh"
 
     - id: install
-      if: ${{ steps.resolve.outputs.control-plane-mode == 'none' }}
+      if: ${{ steps.resolve.outputs.control-plane-mode == 'none' && inputs.command != 'install-console' }}
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
@@ -177,6 +237,7 @@ runs:
       env:
         APPALOFT_BIN: ${{ steps.install.outputs.appaloft-bin }}
         INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_VERSION: ${{ inputs.version }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_SOURCE: ${{ inputs.source }}
         INPUT_RUNTIME_NAME: ${{ inputs.runtime-name }}
@@ -185,6 +246,20 @@ runs:
         INPUT_SSH_PORT: ${{ inputs.ssh-port }}
         INPUT_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
         INPUT_SSH_PRIVATE_KEY_FILE: ${{ inputs.ssh-private-key-file }}
+        INPUT_CONSOLE_URL: ${{ inputs.console-url }}
+        INPUT_CONSOLE_DOMAIN: ${{ inputs.console-domain }}
+        INPUT_CONSOLE_DATABASE: ${{ inputs.console-database }}
+        INPUT_CONSOLE_ORCHESTRATOR: ${{ inputs.console-orchestrator }}
+        INPUT_CONSOLE_HTTP_HOST: ${{ inputs.console-http-host }}
+        INPUT_CONSOLE_HTTP_PORT: ${{ inputs.console-http-port }}
+        INPUT_CONSOLE_INSTALL_DIR: ${{ inputs.console-install-dir }}
+        INPUT_CONSOLE_COMPOSE_PROJECT_NAME: ${{ inputs.console-compose-project-name }}
+        INPUT_CONSOLE_SWARM_STACK_NAME: ${{ inputs.console-swarm-stack-name }}
+        INPUT_CONSOLE_SWARM_INIT: ${{ inputs.console-swarm-init }}
+        INPUT_CONSOLE_SWARM_ADVERTISE_ADDR: ${{ inputs.console-swarm-advertise-addr }}
+        INPUT_CONSOLE_IMAGE: ${{ inputs.console-image }}
+        INPUT_CONSOLE_INSTALLER_URL: ${{ inputs.console-installer-url }}
+        INPUT_CONSOLE_SKIP_DOCKER_INSTALL: ${{ inputs.console-skip-docker-install }}
         INPUT_SERVER_PROVIDER: ${{ inputs.server-provider }}
         INPUT_SERVER_PROXY_KIND: ${{ inputs.server-proxy-kind }}
         INPUT_STATE_BACKEND: ${{ inputs.state-backend }}
@@ -201,6 +276,7 @@ runs:
         INPUT_CONTROL_PLANE_URL: ${{ steps.resolve.outputs.control-plane-url }}
         INPUT_APPALOFT_TOKEN: ${{ inputs.appaloft-token }}
         INPUT_USE_OIDC: ${{ inputs.use-oidc }}
+        INPUT_SERVER_CONFIG_DEPLOY: ${{ inputs.server-config-deploy }}
         INPUT_PROJECT_ID: ${{ inputs.project-id }}
         INPUT_ENVIRONMENT_ID: ${{ inputs.environment-id }}
         INPUT_RESOURCE_ID: ${{ inputs.resource-id }}
