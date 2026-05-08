@@ -57,6 +57,68 @@ secrets:
     from: ci-env:DATABASE_URL
 ```
 
+## Install Self-Hosted Console
+
+Use `command: install-console` when a workflow should install or upgrade an Appaloft console on an
+SSH host before other repositories deploy through `control-plane-mode: self-hosted`.
+
+```yaml
+name: Install Appaloft Console
+
+on:
+  workflow_dispatch:
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: appaloft-console
+      url: ${{ steps.console.outputs.console-url }}
+    steps:
+      - uses: appaloft/deploy-action@v1
+        id: console
+        with:
+          command: install-console
+          version: latest
+          ssh-host: ${{ secrets.APPALOFT_CONSOLE_SSH_HOST }}
+          ssh-user: ${{ secrets.APPALOFT_CONSOLE_SSH_USER }}
+          ssh-private-key: ${{ secrets.APPALOFT_CONSOLE_SSH_PRIVATE_KEY }}
+          console-domain: console.example.com
+          console-database: pglite
+          console-orchestrator: compose
+          console-skip-docker-install: true
+```
+
+The action connects to the SSH host, downloads the matching Appaloft release `install.sh`, runs the
+self-hosted Docker installer with the selected public console origin and Docker orchestrator, and
+verifies `/api/health`. `console-url` may be supplied directly when the public origin is not
+`https://<console-domain>`. Set `console-orchestrator: swarm` to deploy the console as a Docker
+Swarm stack; `console-swarm-init: true` may initialize a single-node Swarm manager when the host is
+not already a manager. This command is separate from `deploy`, so the original pure SSH CLI
+deployment path remains available.
+
+Non-secret console install settings can live in the selected config file. SSH host, SSH key, API
+tokens, and raw database credentials still come from trusted workflow inputs or secrets.
+
+```yaml
+controlPlane:
+  mode: self-hosted
+  url: https://console.example.com
+  install:
+    database: pglite
+    orchestrator: swarm
+    httpPort: 3001
+    swarmStackName: appaloft-console
+    swarmInit: true
+```
+
+When `command: install-console` is used, explicit action inputs override the matching
+`controlPlane.install.*` values. If `console-url` is omitted, the action uses
+`controlPlane.install.url`, then `controlPlane.url`, then `https://<console-domain>`, and finally
+`http://<ssh-host>:<console-http-port>`.
+
 ## Pull Request Preview
 
 Action-only pull request previews require a workflow file. The action does not install a webhook or
@@ -195,11 +257,50 @@ them to bootstrap a missing source link before later runs omit ids. When ids are
 resolves project, environment, resource, and target from existing source-link state. It does not
 install or invoke the Appaloft CLI, open SSH, or read or write SSH-server PGlite state.
 
+`server-config-deploy: true` selects the next self-hosted server config workflow. In that mode the
+action feature-gates server support through `/api/version` before source package handoff and then
+calls `POST /api/action/deployments/from-config-package`. A server that does not advertise source
+package and server-side config bootstrap support fails before package upload or state mutation. This
+mode is for compatible `0.9.x` self-hosted servers; leave it unset for the existing source-link
+trigger mode.
+
+```yaml
+- uses: appaloft/deploy-action@v1
+  id: deploy
+  with:
+    control-plane-mode: self-hosted
+    control-plane-url: https://console.example.com
+    appaloft-token: ${{ secrets.APPALOFT_TOKEN }}
+    server-config-deploy: true
+    config: appaloft.yml
+```
+
+If the committed config declares `secrets.KEY.from: ci-env:NAME`, expose the GitHub secret to the
+runner environment and list the matching `secret-variables` entry. The action resolves the value
+locally, sends it only as transient API payload to the self-hosted server, and the server applies it
+as a runtime secret through its environment-variable operation.
+
+```yaml
+- uses: appaloft/deploy-action@v1
+  id: deploy
+  env:
+    APPALOFT_BETTER_AUTH_SECRET: ${{ secrets.APPALOFT_BETTER_AUTH_SECRET }}
+  with:
+    control-plane-mode: self-hosted
+    control-plane-url: https://console.example.com
+    appaloft-token: ${{ secrets.APPALOFT_TOKEN }}
+    server-config-deploy: true
+    config: appaloft.yml
+    secret-variables: |
+      APPALOFT_BETTER_AUTH_SECRET=ci-env:APPALOFT_BETTER_AUTH_SECRET
+```
+
 For `preview: pull-request`, server API mode derives a preview-scoped source fingerprint and calls
 the same deployment endpoint. It writes `preview-id`, `deployment-id`, `deployment-url`, and
 `console-url` outputs, but it does not apply `preview-domain-template`, `preview-tls-mode`,
-`require-preview-url`, `runtime-name`, `environment-variables`, or `secret-variables` in server
-mode.
+`require-preview-url`, `runtime-name`, or `environment-variables` in server mode. In
+`server-config-deploy` mode, `secret-variables` is reserved for resolving committed `ci-env:`
+secret references before the API request.
 
 ```yaml
 - uses: appaloft/deploy-action@v1
@@ -252,8 +353,8 @@ source-link state, or the Appaloft server, not from committed config.
 
 | Input | Default | Purpose |
 | --- | --- | --- |
-| `command` | `deploy` | `deploy` or `preview-cleanup`. |
-| `version` | `latest` | Appaloft CLI release tag such as `v0.9.0`. |
+| `command` | `deploy` | `deploy`, `preview-cleanup`, or `install-console`. |
+| `version` | `latest` | Appaloft release tag such as `v0.9.0`. Used for CLI install and self-hosted console install. |
 | `config` | empty | Optional Appaloft config path. If omitted, `appaloft.yml` is used only when present. |
 | `source` | `.` | Source path or locator passed to the CLI. |
 | `runtime-name` | empty | Trusted runtime name override for deploy. |
@@ -262,11 +363,25 @@ source-link state, or the Appaloft server, not from committed config.
 | `ssh-port` | empty | SSH port. |
 | `ssh-private-key` | empty | SSH private key value, written to a temp file before invoking Appaloft. |
 | `ssh-private-key-file` | empty | Existing runner-local private key path. Mutually exclusive with `ssh-private-key`. |
+| `console-url` | empty | Public console origin for `command: install-console`. Defaults to `https://<console-domain>` or `http://<ssh-host>:<console-http-port>`. |
+| `console-domain` | empty | Public console domain used to derive `console-url` when `console-url` is empty. |
+| `console-database` | config or `pglite` | Self-hosted console database backend for `command: install-console`; `pglite` or `postgres`. |
+| `console-orchestrator` | config or `compose` | Self-hosted Docker orchestrator for `command: install-console`; `compose` or `swarm`. |
+| `console-http-host` | config or `0.0.0.0` | Host bind address passed to the self-hosted console installer. |
+| `console-http-port` | config or `3001` | Host HTTP port passed to the self-hosted console installer. |
+| `console-install-dir` | empty | Remote install directory passed to the self-hosted console installer. Empty uses the installer default. |
+| `console-compose-project-name` | config or `appaloft` | Docker Compose project name passed to the self-hosted console installer. |
+| `console-swarm-stack-name` | config or `appaloft` | Docker Swarm stack name passed to the self-hosted console installer. |
+| `console-swarm-init` | config or `false` | Initialize a single-node Swarm manager when `console-orchestrator` is `swarm`. |
+| `console-swarm-advertise-addr` | empty | Optional advertise address passed to `docker swarm init`. |
+| `console-image` | config or `ghcr.io/appaloft/appaloft` | Appaloft console image repository or full image reference passed to the self-hosted console installer. |
+| `console-installer-url` | empty | Override URL for the self-hosted `install.sh` used by `command: install-console`. |
+| `console-skip-docker-install` | `false` | Require Docker Engine to already exist on the SSH host during `command: install-console`. |
 | `server-provider` | `generic-ssh` | Server provider key. |
 | `server-proxy-kind` | empty | Server proxy kind such as `traefik` or `caddy`. |
 | `state-backend` | empty | Explicit state backend. SSH targets default to `ssh-pglite`. |
 | `environment-variables` | empty | Newline-separated values passed as repeated CLI `--env` flags in pure SSH CLI mode. |
-| `secret-variables` | empty | Newline-separated values passed as repeated CLI `--secret` flags in pure SSH CLI mode. Prefer `ci-env:` references over raw secret values. |
+| `secret-variables` | empty | Newline-separated values passed as repeated CLI `--secret` flags in pure SSH CLI mode. In `server-config-deploy` mode, resolves `ci-env:` references and sends the matched values as transient server API payload for committed config `secrets` entries. Prefer `ci-env:` references over raw secret values. |
 | `preview` | empty | Use `pull-request` for PR preview deploy or cleanup. |
 | `preview-id` | empty | Trusted preview scope, for example `pr-123`. Required for pull request previews. |
 | `preview-domain-template` | empty | Trusted preview hostname for deploy, for example `pr-123.preview.example.com`. |
@@ -278,6 +393,7 @@ source-link state, or the Appaloft server, not from committed config.
 | `control-plane-url` | empty | Self-hosted Appaloft server endpoint for server API mode. When empty, `controlPlane.url` from config may supply the endpoint. |
 | `appaloft-token` | empty | Optional bearer token for server API mode. |
 | `use-oidc` | `false` | Reserved for future GitHub OIDC exchange. |
+| `server-config-deploy` | `false` | Experimental self-hosted mode that calls `POST /api/action/deployments/from-config-package` after the server advertises source package and server-side config bootstrap support. |
 | `project-id` | empty | Optional trusted project id for server API mode. When supplied with environment/resource/server ids, the server may bootstrap a missing source link. When omitted with the other ids, the server resolves context from source-link state. |
 | `environment-id` | empty | Optional trusted environment id for server API mode. Required only when any explicit deployment id is supplied. |
 | `resource-id` | empty | Optional trusted resource id for server API mode. Required only when any explicit deployment id is supplied. |
@@ -294,7 +410,7 @@ source-link state, or the Appaloft server, not from committed config.
 | `preview-url` | Public preview URL when Appaloft resolves one during deploy. |
 | `deployment-id` | Deployment id accepted by Appaloft. |
 | `deployment-url` | Self-hosted Appaloft console deployment detail URL when available. |
-| `console-url` | Self-hosted Appaloft console URL used by server API mode. |
+| `console-url` | Self-hosted Appaloft console URL installed by `install-console` or used by server API mode. |
 | `preview-cleanup-status` | Cleanup status returned by server API mode for `command: preview-cleanup`. |
 
 ## Security Notes
@@ -312,6 +428,11 @@ source-link state, or the Appaloft server, not from committed config.
   rejected until the server owns that policy. `command: preview-cleanup` accepts only source/config
   and trusted preview scope inputs. Deployment target ids are intentionally ignored/rejected for
   cleanup because cleanup resolves from server-owned source-link state.
+- `server-config-deploy` requires explicit self-hosted server support. The action fails before
+  source package handoff when the server handshake does not advertise the required capability.
+- In `server-config-deploy` mode, `secret-variables` supports only `KEY=ci-env:NAME` references.
+  Missing runner environment values fail before the server API request, and raw secret values are
+  not written to step summaries or PR comments.
 - `pr-comment` requires explicit workflow permission and token wiring. The action updates the same
   marker comment for the PR instead of creating a new comment on each run. Comment API failures are
   warnings so they do not mask a successful deployment.
