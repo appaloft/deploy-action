@@ -54,6 +54,10 @@ inputs:
     description: Self-hosted console database backend for command=install-console.
     required: false
     default: "pglite"
+  console-orchestrator:
+    description: Self-hosted console Docker orchestrator for command=install-console.
+    required: false
+    default: "compose"
   console-http-host:
     description: Host bind address passed to the self-hosted console installer.
     required: false
@@ -64,6 +68,22 @@ inputs:
     default: "3001"
   console-install-dir:
     description: Remote install directory passed to the self-hosted console installer. Defaults to the installer default.
+    required: false
+    default: ""
+  console-compose-project-name:
+    description: Docker Compose project name passed to the self-hosted console installer.
+    required: false
+    default: "appaloft"
+  console-swarm-stack-name:
+    description: Docker Swarm stack name passed to the self-hosted console installer.
+    required: false
+    default: "appaloft"
+  console-swarm-init:
+    description: Initialize a single-node Swarm manager on the SSH host when command=install-console and console-orchestrator=swarm.
+    required: false
+    default: "false"
+  console-swarm-advertise-addr:
+    description: Optional advertise address passed to docker swarm init for command=install-console.
     required: false
     default: ""
   console-image:
@@ -187,7 +207,7 @@ outputs:
     description: Self-hosted Appaloft console deployment detail URL when available.
     value: ${{ steps.deploy.outputs.deployment-url }}
   console-url:
-    description: Self-hosted Appaloft console URL used by server API mode.
+    description: Self-hosted Appaloft console URL installed by install-console or used by server API mode.
     value: ${{ steps.deploy.outputs.console-url }}
   preview-cleanup-status:
     description: Preview cleanup status when command is preview-cleanup.
@@ -229,9 +249,14 @@ runs:
         INPUT_CONSOLE_URL: ${{ inputs.console-url }}
         INPUT_CONSOLE_DOMAIN: ${{ inputs.console-domain }}
         INPUT_CONSOLE_DATABASE: ${{ inputs.console-database }}
+        INPUT_CONSOLE_ORCHESTRATOR: ${{ inputs.console-orchestrator }}
         INPUT_CONSOLE_HTTP_HOST: ${{ inputs.console-http-host }}
         INPUT_CONSOLE_HTTP_PORT: ${{ inputs.console-http-port }}
         INPUT_CONSOLE_INSTALL_DIR: ${{ inputs.console-install-dir }}
+        INPUT_CONSOLE_COMPOSE_PROJECT_NAME: ${{ inputs.console-compose-project-name }}
+        INPUT_CONSOLE_SWARM_STACK_NAME: ${{ inputs.console-swarm-stack-name }}
+        INPUT_CONSOLE_SWARM_INIT: ${{ inputs.console-swarm-init }}
+        INPUT_CONSOLE_SWARM_ADVERTISE_ADDR: ${{ inputs.console-swarm-advertise-addr }}
         INPUT_CONSOLE_IMAGE: ${{ inputs.console-image }}
         INPUT_CONSOLE_INSTALLER_URL: ${{ inputs.console-installer-url }}
         INPUT_CONSOLE_SKIP_DOCKER_INSTALL: ${{ inputs.console-skip-docker-install }}

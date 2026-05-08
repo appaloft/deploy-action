@@ -418,6 +418,15 @@ validate_console_install_inputs() {
       ;;
   esac
 
+  case "$console_orchestrator" in
+    compose|swarm)
+      ;;
+    *)
+      error "console-orchestrator must be compose or swarm"
+      exit 1
+      ;;
+  esac
+
   case "$console_http_port" in
     ''|*[!0-9]*)
       error "console-http-port must be a positive integer"
@@ -462,9 +471,21 @@ run_console_install() {
   console_url="$(normalized_url "$console_url")"
   installer_url="$(console_installer_url_for_version "$input_version")"
 
-  install_args="--version $(shell_quote "$input_version") --web-origin $(shell_quote "$console_url") --database $(shell_quote "$console_database") --host $(shell_quote "$console_http_host") --port $(shell_quote "$console_http_port") --image $(shell_quote "$console_image")"
+  install_args="--version $(shell_quote "$input_version") --web-origin $(shell_quote "$console_url") --database $(shell_quote "$console_database") --orchestrator $(shell_quote "$console_orchestrator") --host $(shell_quote "$console_http_host") --port $(shell_quote "$console_http_port") --image $(shell_quote "$console_image")"
   if [ -n "$console_install_dir" ]; then
     install_args="$install_args --home $(shell_quote "$console_install_dir")"
+  fi
+  if [ "$console_orchestrator" = "compose" ] && [ -n "$console_compose_project_name" ]; then
+    install_args="$install_args --project-name $(shell_quote "$console_compose_project_name")"
+  fi
+  if [ "$console_orchestrator" = "swarm" ] && [ -n "$console_swarm_stack_name" ]; then
+    install_args="$install_args --stack-name $(shell_quote "$console_swarm_stack_name")"
+  fi
+  if [ "$console_orchestrator" = "swarm" ] && truthy "$console_swarm_init"; then
+    install_args="$install_args --swarm-init"
+  fi
+  if [ "$console_orchestrator" = "swarm" ] && [ -n "$console_swarm_advertise_addr" ]; then
+    install_args="$install_args --swarm-advertise-addr $(shell_quote "$console_swarm_advertise_addr")"
   fi
   if truthy "$console_skip_docker_install"; then
     install_args="$install_args --skip-docker-install"
@@ -664,9 +685,14 @@ ssh_private_key_file="${INPUT_SSH_PRIVATE_KEY_FILE:-}"
 console_url="${INPUT_CONSOLE_URL:-}"
 console_domain="${INPUT_CONSOLE_DOMAIN:-}"
 console_database="${INPUT_CONSOLE_DATABASE:-pglite}"
+console_orchestrator="${INPUT_CONSOLE_ORCHESTRATOR:-compose}"
 console_http_host="${INPUT_CONSOLE_HTTP_HOST:-0.0.0.0}"
 console_http_port="${INPUT_CONSOLE_HTTP_PORT:-3001}"
 console_install_dir="${INPUT_CONSOLE_INSTALL_DIR:-}"
+console_compose_project_name="${INPUT_CONSOLE_COMPOSE_PROJECT_NAME:-appaloft}"
+console_swarm_stack_name="${INPUT_CONSOLE_SWARM_STACK_NAME:-appaloft}"
+console_swarm_init="${INPUT_CONSOLE_SWARM_INIT:-false}"
+console_swarm_advertise_addr="${INPUT_CONSOLE_SWARM_ADVERTISE_ADDR:-}"
 console_image="${INPUT_CONSOLE_IMAGE:-ghcr.io/appaloft/appaloft}"
 console_skip_docker_install="${INPUT_CONSOLE_SKIP_DOCKER_INSTALL:-false}"
 state_backend="${INPUT_STATE_BACKEND:-}"
