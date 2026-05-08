@@ -273,6 +273,78 @@ console_href_url() {
   esac
 }
 
+version_supports_action_server_config_deploy() {
+  node -e '
+    const fs = require("fs");
+    const input = fs.readFileSync(0, "utf8");
+    const parsed = JSON.parse(input);
+    const features = parsed && typeof parsed.features === "object" && parsed.features
+      ? parsed.features
+      : {};
+    const supported =
+      parsed.actionServerConfigDeploy === true ||
+      features.actionServerConfigDeploy === true ||
+      (
+        (features.sourcePackage === true || features.sourcePackages === true) &&
+        features.serverSideConfigBootstrap === true
+      );
+    process.exit(supported ? 0 : 1);
+  '
+}
+
+source_package_payload_for_action() {
+  local source_fingerprint="$1"
+  local selected_config="$2"
+  local source_root="$3"
+  local payload
+
+  payload="{\"sourceFingerprint\":\"$(json_escape "$source_fingerprint")\",\"configPath\":\"$(json_escape "$selected_config")\",\"sourceRoot\":\"$(json_escape "$source_root")\",\"sourcePackage\":{\"transport\":\"server-github-fetch\",\"sourceFingerprint\":\"$(json_escape "$source_fingerprint")\",\"configPath\":\"$(json_escape "$selected_config")\",\"sourceRoot\":\"$(json_escape "$source_root")\""
+  if [ -n "${GITHUB_SHA:-}" ]; then
+    payload="${payload},\"revision\":\"$(json_escape "$GITHUB_SHA")\""
+  fi
+  if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    payload="${payload},\"repositoryFullName\":\"$(json_escape "$GITHUB_REPOSITORY")\""
+  fi
+  if [ -n "${GITHUB_REPOSITORY_ID:-}" ]; then
+    payload="${payload},\"repositoryId\":\"$(json_escape "$GITHUB_REPOSITORY_ID")\""
+  fi
+  payload="${payload}}"
+  if [ -n "$project_id" ] || [ -n "$environment_id" ] || [ -n "$resource_id" ] || [ -n "$server_id" ] || [ -n "$destination_id" ] || [ -n "${GITHUB_REPOSITORY:-}" ] || [ -n "${GITHUB_REPOSITORY_ID:-}" ] || [ -n "${GITHUB_REF:-}" ] || [ -n "${GITHUB_SHA:-}" ]; then
+    payload="${payload},\"trustedContext\":{"
+    local separator=""
+    if [ -n "$project_id" ]; then payload="${payload}${separator}\"projectId\":\"$(json_escape "$project_id")\""; separator=","; fi
+    if [ -n "$environment_id" ]; then payload="${payload}${separator}\"environmentId\":\"$(json_escape "$environment_id")\""; separator=","; fi
+    if [ -n "$resource_id" ]; then payload="${payload}${separator}\"resourceId\":\"$(json_escape "$resource_id")\""; separator=","; fi
+    if [ -n "$server_id" ]; then payload="${payload}${separator}\"serverId\":\"$(json_escape "$server_id")\""; separator=","; fi
+    if [ -n "$destination_id" ]; then payload="${payload}${separator}\"destinationId\":\"$(json_escape "$destination_id")\""; separator=","; fi
+    if [ -n "${GITHUB_REPOSITORY:-}" ]; then payload="${payload}${separator}\"repositoryFullName\":\"$(json_escape "$GITHUB_REPOSITORY")\""; separator=","; fi
+    if [ -n "${GITHUB_REPOSITORY_ID:-}" ]; then payload="${payload}${separator}\"repositoryId\":\"$(json_escape "$GITHUB_REPOSITORY_ID")\""; separator=","; fi
+    if [ -n "${GITHUB_REF:-}" ]; then payload="${payload}${separator}\"ref\":\"$(json_escape "$GITHUB_REF")\""; separator=","; fi
+    if [ -n "${GITHUB_SHA:-}" ]; then payload="${payload}${separator}\"revision\":\"$(json_escape "$GITHUB_SHA")\""; fi
+    payload="${payload}}"
+  fi
+  if [ "$preview" = "pull-request" ]; then
+    payload="${payload},\"preview\":{\"kind\":\"pull-request\",\"previewId\":\"$(json_escape "$preview_id")\""
+    local pr_number
+    pr_number="$(pull_request_number_from_context)"
+    if [ -n "$pr_number" ]; then
+      payload="${payload},\"pullRequestNumber\":${pr_number}"
+    fi
+    if [ -n "${GITHUB_SHA:-}" ]; then
+      payload="${payload},\"headSha\":\"$(json_escape "$GITHUB_SHA")\""
+    fi
+    if [ -n "${GITHUB_BASE_REF:-}" ]; then
+      payload="${payload},\"baseRef\":\"$(json_escape "$GITHUB_BASE_REF")\""
+    fi
+    if [ -n "${GITHUB_HEAD_REF:-}" ]; then
+      payload="${payload},\"headRef\":\"$(json_escape "$GITHUB_HEAD_REF")\""
+    fi
+    payload="${payload}}"
+  fi
+  payload="${payload}}"
+  printf '%s' "$payload"
+}
+
 append_step_summary() {
   if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
     return 0
@@ -444,6 +516,7 @@ control_plane_mode="$input_control_plane_mode"
 control_plane_url="${INPUT_CONTROL_PLANE_URL:-}"
 appaloft_token="${INPUT_APPALOFT_TOKEN:-}"
 use_oidc="${INPUT_USE_OIDC:-false}"
+server_config_deploy="${INPUT_SERVER_CONFIG_DEPLOY:-false}"
 ssh_private_key="${INPUT_SSH_PRIVATE_KEY:-}"
 ssh_private_key_file="${INPUT_SSH_PRIVATE_KEY_FILE:-}"
 state_backend="${INPUT_STATE_BACKEND:-}"
@@ -522,6 +595,11 @@ if truthy "$use_oidc"; then
   exit 1
 fi
 
+if truthy "$server_config_deploy" && { [ "$control_plane_mode" != "self-hosted" ] || [ "$wrapper_command" != "deploy" ]; }; then
+  error "server-config-deploy requires control-plane-mode=self-hosted and command=deploy"
+  exit 1
+fi
+
 if [ -n "$ssh_private_key" ] && [ -n "$ssh_private_key_file" ]; then
   error "ssh-private-key and ssh-private-key-file are mutually exclusive"
   exit 1
@@ -567,8 +645,13 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
     exit 1
   fi
 
-  if [ "$wrapper_command" = "deploy" ] && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ] || [ -n "$secret_variables" ]; }; then
+  if [ "$wrapper_command" = "deploy" ] && ! truthy "$server_config_deploy" && { [ "$source_locator" != "." ] || [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ] || [ -n "$secret_variables" ]; }; then
     error "self-hosted control-plane mode deploys an existing Appaloft resource profile; source, runtime/profile, environment, secret, and preview route inputs are not applied in this slice"
+    exit 1
+  fi
+
+  if truthy "$server_config_deploy" && { [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ] || [ -n "$secret_variables" ]; }; then
+    error "server-config-deploy hands source/config to the self-hosted server and does not accept runner-side profile, env, secret, or preview route inputs"
     exit 1
   fi
 
@@ -588,6 +671,8 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
         printf 'GET %s/api/version\n' "$control_plane_url"
         if [ "$wrapper_command" = "preview-cleanup" ]; then
           printf 'POST %s/api/deployments/cleanup-preview\n' "$control_plane_url"
+        elif truthy "$server_config_deploy"; then
+          printf 'POST %s/api/action/deployments/from-config-package\n' "$control_plane_url"
         else
           printf 'POST %s/api/action/deployments/from-source-link\n' "$control_plane_url"
         fi
@@ -596,6 +681,8 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
       printf 'GET %s/api/version\n' "$control_plane_url"
       if [ "$wrapper_command" = "preview-cleanup" ]; then
         printf 'POST %s/api/deployments/cleanup-preview\n' "$control_plane_url"
+      elif truthy "$server_config_deploy"; then
+        printf 'POST %s/api/action/deployments/from-config-package\n' "$control_plane_url"
       else
         printf 'POST %s/api/action/deployments/from-source-link\n' "$control_plane_url"
       fi
@@ -604,6 +691,11 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
     version_response="$(curl "${curl_args[@]}" "$control_plane_url/api/version")"
     if [[ "$version_response" != *'"apiVersion":"v1"'* && "$version_response" != *'"apiVersion": "v1"'* ]]; then
       error "self-hosted control-plane handshake failed: expected apiVersion v1"
+      exit 1
+    fi
+
+    if truthy "$server_config_deploy" && ! printf '%s' "$version_response" | version_supports_action_server_config_deploy; then
+      error "self-hosted control-plane does not support Action Server Config Deploy; missing sourcePackage/serverSideConfigBootstrap feature"
       exit 1
     fi
 
@@ -626,7 +718,12 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
       fi
       echo "preview-cleanup-status=$cleanup_status" >> "${GITHUB_OUTPUT:-/dev/null}"
     else
-      deploy_endpoint="$control_plane_url/api/action/deployments/from-source-link"
+      if truthy "$server_config_deploy"; then
+        deploy_endpoint="$control_plane_url/api/action/deployments/from-config-package"
+        payload="$(source_package_payload_for_action "$source_fingerprint" "${selected_config_path:-appaloft.yml}" "${config_source_base_directory:-.}")"
+      else
+        deploy_endpoint="$control_plane_url/api/action/deployments/from-source-link"
+      fi
       deploy_response="$(curl "${curl_args[@]}" -X POST "$deploy_endpoint" -H "Content-Type: application/json" --data "$payload")"
       deployment_id="$(printf '%s\n' "$deploy_response" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
       if [ -z "$deployment_id" ]; then

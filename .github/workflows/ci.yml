@@ -68,6 +68,25 @@ jobs:
           grep -q '^preview-id=pr-1$' "$tmp/github-output"
           grep -q '^console-url=https://console.example.com$' "$tmp/github-output"
 
+      - name: Validate dry-run self-hosted server config deploy
+        env:
+          APPALOFT_DEPLOY_ACTION_DRY_RUN: "true"
+          INPUT_CONFIG: appaloft.yml
+          INPUT_CONTROL_PLANE_MODE: self-hosted
+          INPUT_CONTROL_PLANE_URL: https://console.example.com/
+          INPUT_SERVER_CONFIG_DEPLOY: "true"
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          export GITHUB_OUTPUT="$tmp/github-output"
+          export APPALOFT_DEPLOY_ACTION_ARGV_PATH="$tmp/argv"
+
+          bash scripts/run-deploy.sh
+
+          grep -q '^GET https://console.example.com/api/version$' "$tmp/argv"
+          grep -q '^POST https://console.example.com/api/action/deployments/from-config-package$' "$tmp/argv"
+          grep -q '^console-url=https://console.example.com$' "$tmp/github-output"
+
       - name: Opt-in exact-version install smoke
         if: ${{ vars.APPALOFT_INSTALL_SMOKE_VERSION != '' }}
         env:
