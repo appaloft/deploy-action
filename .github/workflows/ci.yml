@@ -95,6 +95,9 @@ jobs:
           INPUT_SSH_HOST: 203.0.113.10
           INPUT_CONSOLE_DOMAIN: console.example.com
           INPUT_CONSOLE_DATABASE: pglite
+          INPUT_CONSOLE_ORCHESTRATOR: swarm
+          INPUT_CONSOLE_SWARM_STACK_NAME: appaloft-console
+          INPUT_CONSOLE_SWARM_INIT: "true"
           INPUT_CONSOLE_SKIP_DOCKER_INSTALL: "true"
         run: |
           tmp="$(mktemp -d)"
@@ -107,6 +110,9 @@ jobs:
 
           grep -q '^SSH root@203.0.113.10:22$' "$tmp/argv"
           grep -q '^INSTALLER https://github.com/appaloft/appaloft/releases/download/v0.9.1/install.sh$' "$tmp/argv"
+          grep -q -- "--orchestrator 'swarm'" "$tmp/argv"
+          grep -q -- "--stack-name 'appaloft-console'" "$tmp/argv"
+          grep -q -- "--swarm-init" "$tmp/argv"
           grep -q '^HEALTH https://console.example.com/api/health$' "$tmp/argv"
           grep -q '^console-url=https://console.example.com$' "$tmp/github-output"
 
