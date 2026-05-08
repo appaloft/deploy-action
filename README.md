@@ -57,6 +57,45 @@ secrets:
     from: ci-env:DATABASE_URL
 ```
 
+## Install Self-Hosted Console
+
+Use `command: install-console` when a workflow should install or upgrade an Appaloft console on an
+SSH host before other repositories deploy through `control-plane-mode: self-hosted`.
+
+```yaml
+name: Install Appaloft Console
+
+on:
+  workflow_dispatch:
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: appaloft-console
+      url: ${{ steps.console.outputs.console-url }}
+    steps:
+      - uses: appaloft/deploy-action@v1
+        id: console
+        with:
+          command: install-console
+          version: latest
+          ssh-host: ${{ secrets.APPALOFT_CONSOLE_SSH_HOST }}
+          ssh-user: ${{ secrets.APPALOFT_CONSOLE_SSH_USER }}
+          ssh-private-key: ${{ secrets.APPALOFT_CONSOLE_SSH_PRIVATE_KEY }}
+          console-domain: console.example.com
+          console-database: pglite
+          console-skip-docker-install: true
+```
+
+The action connects to the SSH host, downloads the matching Appaloft release `install.sh`, runs the
+self-hosted Docker installer with the selected public console origin, and verifies
+`/api/health`. `console-url` may be supplied directly when the public origin is not
+`https://<console-domain>`. This command is separate from `deploy`, so the original pure SSH CLI
+deployment path remains available.
+
 ## Pull Request Preview
 
 Action-only pull request previews require a workflow file. The action does not install a webhook or
@@ -270,8 +309,8 @@ source-link state, or the Appaloft server, not from committed config.
 
 | Input | Default | Purpose |
 | --- | --- | --- |
-| `command` | `deploy` | `deploy` or `preview-cleanup`. |
-| `version` | `latest` | Appaloft CLI release tag such as `v0.9.0`. |
+| `command` | `deploy` | `deploy`, `preview-cleanup`, or `install-console`. |
+| `version` | `latest` | Appaloft release tag such as `v0.9.0`. Used for CLI install and self-hosted console install. |
 | `config` | empty | Optional Appaloft config path. If omitted, `appaloft.yml` is used only when present. |
 | `source` | `.` | Source path or locator passed to the CLI. |
 | `runtime-name` | empty | Trusted runtime name override for deploy. |
@@ -280,6 +319,15 @@ source-link state, or the Appaloft server, not from committed config.
 | `ssh-port` | empty | SSH port. |
 | `ssh-private-key` | empty | SSH private key value, written to a temp file before invoking Appaloft. |
 | `ssh-private-key-file` | empty | Existing runner-local private key path. Mutually exclusive with `ssh-private-key`. |
+| `console-url` | empty | Public console origin for `command: install-console`. Defaults to `https://<console-domain>` or `http://<ssh-host>:<console-http-port>`. |
+| `console-domain` | empty | Public console domain used to derive `console-url` when `console-url` is empty. |
+| `console-database` | `pglite` | Self-hosted console database backend for `command: install-console`; `pglite` or `postgres`. |
+| `console-http-host` | `0.0.0.0` | Host bind address passed to the self-hosted console installer. |
+| `console-http-port` | `3001` | Host HTTP port passed to the self-hosted console installer. |
+| `console-install-dir` | empty | Remote install directory passed to the self-hosted console installer. Empty uses the installer default. |
+| `console-image` | `ghcr.io/appaloft/appaloft` | Appaloft console image repository or full image reference passed to the self-hosted console installer. |
+| `console-installer-url` | empty | Override URL for the self-hosted `install.sh` used by `command: install-console`. |
+| `console-skip-docker-install` | `false` | Require Docker Engine to already exist on the SSH host during `command: install-console`. |
 | `server-provider` | `generic-ssh` | Server provider key. |
 | `server-proxy-kind` | empty | Server proxy kind such as `traefik` or `caddy`. |
 | `state-backend` | empty | Explicit state backend. SSH targets default to `ssh-pglite`. |
@@ -313,7 +361,7 @@ source-link state, or the Appaloft server, not from committed config.
 | `preview-url` | Public preview URL when Appaloft resolves one during deploy. |
 | `deployment-id` | Deployment id accepted by Appaloft. |
 | `deployment-url` | Self-hosted Appaloft console deployment detail URL when available. |
-| `console-url` | Self-hosted Appaloft console URL used by server API mode. |
+| `console-url` | Self-hosted Appaloft console URL installed by `install-console` or used by server API mode. |
 | `preview-cleanup-status` | Cleanup status returned by server API mode for `command: preview-cleanup`. |
 
 ## Security Notes
