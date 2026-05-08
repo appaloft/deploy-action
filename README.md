@@ -87,13 +87,16 @@ jobs:
           ssh-private-key: ${{ secrets.APPALOFT_CONSOLE_SSH_PRIVATE_KEY }}
           console-domain: console.example.com
           console-database: pglite
+          console-orchestrator: compose
           console-skip-docker-install: true
 ```
 
 The action connects to the SSH host, downloads the matching Appaloft release `install.sh`, runs the
-self-hosted Docker installer with the selected public console origin, and verifies
-`/api/health`. `console-url` may be supplied directly when the public origin is not
-`https://<console-domain>`. This command is separate from `deploy`, so the original pure SSH CLI
+self-hosted Docker installer with the selected public console origin and Docker orchestrator, and
+verifies `/api/health`. `console-url` may be supplied directly when the public origin is not
+`https://<console-domain>`. Set `console-orchestrator: swarm` to deploy the console as a Docker
+Swarm stack; `console-swarm-init: true` may initialize a single-node Swarm manager when the host is
+not already a manager. This command is separate from `deploy`, so the original pure SSH CLI
 deployment path remains available.
 
 ## Pull Request Preview
@@ -322,9 +325,14 @@ source-link state, or the Appaloft server, not from committed config.
 | `console-url` | empty | Public console origin for `command: install-console`. Defaults to `https://<console-domain>` or `http://<ssh-host>:<console-http-port>`. |
 | `console-domain` | empty | Public console domain used to derive `console-url` when `console-url` is empty. |
 | `console-database` | `pglite` | Self-hosted console database backend for `command: install-console`; `pglite` or `postgres`. |
+| `console-orchestrator` | `compose` | Self-hosted Docker orchestrator for `command: install-console`; `compose` or `swarm`. |
 | `console-http-host` | `0.0.0.0` | Host bind address passed to the self-hosted console installer. |
 | `console-http-port` | `3001` | Host HTTP port passed to the self-hosted console installer. |
 | `console-install-dir` | empty | Remote install directory passed to the self-hosted console installer. Empty uses the installer default. |
+| `console-compose-project-name` | `appaloft` | Docker Compose project name passed to the self-hosted console installer. |
+| `console-swarm-stack-name` | `appaloft` | Docker Swarm stack name passed to the self-hosted console installer. |
+| `console-swarm-init` | `false` | Initialize a single-node Swarm manager when `console-orchestrator` is `swarm`. |
+| `console-swarm-advertise-addr` | empty | Optional advertise address passed to `docker swarm init`. |
 | `console-image` | `ghcr.io/appaloft/appaloft` | Appaloft console image repository or full image reference passed to the self-hosted console installer. |
 | `console-installer-url` | empty | Override URL for the self-hosted `install.sh` used by `command: install-console`. |
 | `console-skip-docker-install` | `false` | Require Docker Engine to already exist on the SSH host during `command: install-console`. |
