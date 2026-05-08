@@ -87,6 +87,29 @@ jobs:
           grep -q '^POST https://console.example.com/api/action/deployments/from-config-package$' "$tmp/argv"
           grep -q '^console-url=https://console.example.com$' "$tmp/github-output"
 
+      - name: Validate dry-run console install
+        env:
+          APPALOFT_DEPLOY_ACTION_DRY_RUN: "true"
+          INPUT_COMMAND: install-console
+          INPUT_VERSION: v0.9.1
+          INPUT_SSH_HOST: 203.0.113.10
+          INPUT_CONSOLE_DOMAIN: console.example.com
+          INPUT_CONSOLE_DATABASE: pglite
+          INPUT_CONSOLE_SKIP_DOCKER_INSTALL: "true"
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          export RUNNER_TEMP="$tmp"
+          export GITHUB_OUTPUT="$tmp/github-output"
+          export APPALOFT_DEPLOY_ACTION_ARGV_PATH="$tmp/argv"
+
+          bash scripts/run-deploy.sh
+
+          grep -q '^SSH root@203.0.113.10:22$' "$tmp/argv"
+          grep -q '^INSTALLER https://github.com/appaloft/appaloft/releases/download/v0.9.1/install.sh$' "$tmp/argv"
+          grep -q '^HEALTH https://console.example.com/api/health$' "$tmp/argv"
+          grep -q '^console-url=https://console.example.com$' "$tmp/github-output"
+
       - name: Opt-in exact-version install smoke
         if: ${{ vars.APPALOFT_INSTALL_SMOKE_VERSION != '' }}
         env:
