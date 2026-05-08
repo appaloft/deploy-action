@@ -54,6 +54,10 @@ json_escape() {
   printf '%s' "$value"
 }
 
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 normalized_url() {
   local value="$1"
   value="${value%/}"
@@ -351,12 +355,25 @@ append_step_summary() {
   fi
 
   {
-    if [ "$wrapper_command" = "preview-cleanup" ]; then
-      printf '### Appaloft preview cleanup\n\n'
-    else
-      printf '### Appaloft deployment\n\n'
+    case "$wrapper_command" in
+      preview-cleanup)
+        printf '### Appaloft preview cleanup\n\n'
+        ;;
+      install-console)
+        printf '### Appaloft console install\n\n'
+        ;;
+      *)
+        printf '### Appaloft deployment\n\n'
+        ;;
+    esac
+    if [ -n "${control_plane_url:-}" ]; then
+      printf -- '- Console: %s\n' "$control_plane_url"
+    elif [ -n "${console_url:-}" ]; then
+      printf -- '- Console: %s\n' "$console_url"
     fi
-    printf -- '- Console: %s\n' "$control_plane_url"
+    if [ "$wrapper_command" = "install-console" ] && [ -n "${console_database:-}" ]; then
+      printf -- '- Database: `%s`\n' "$console_database"
+    fi
     if [ -n "${deployment_id:-}" ]; then
       if [ -n "${deployment_url:-}" ]; then
         printf -- '- Deployment: [%s](%s)\n' "$deployment_id" "$deployment_url"
@@ -368,6 +385,130 @@ append_step_summary() {
       printf -- '- Cleanup status: `%s`\n' "$cleanup_status"
     fi
   } >> "$GITHUB_STEP_SUMMARY"
+}
+
+console_installer_url_for_version() {
+  local version="$1"
+  local normalized_version
+
+  if [ -n "${INPUT_CONSOLE_INSTALLER_URL:-}" ]; then
+    printf '%s' "$INPUT_CONSOLE_INSTALLER_URL"
+    return 0
+  fi
+
+  if [ -z "$version" ] || [ "$version" = "latest" ]; then
+    printf 'https://github.com/appaloft/appaloft/releases/latest/download/install.sh'
+    return 0
+  fi
+
+  case "$version" in
+    v*) normalized_version="$version" ;;
+    *) normalized_version="v$version" ;;
+  esac
+  printf 'https://github.com/appaloft/appaloft/releases/download/%s/install.sh' "$normalized_version"
+}
+
+validate_console_install_inputs() {
+  case "$console_database" in
+    postgres|pglite)
+      ;;
+    *)
+      error "console-database must be postgres or pglite"
+      exit 1
+      ;;
+  esac
+
+  case "$console_http_port" in
+    ''|*[!0-9]*)
+      error "console-http-port must be a positive integer"
+      exit 1
+      ;;
+    *)
+      if [ "$console_http_port" -le 0 ]; then
+        error "console-http-port must be a positive integer"
+        exit 1
+      fi
+      ;;
+  esac
+}
+
+run_console_install() {
+  local ssh_host="${INPUT_SSH_HOST:-}"
+  local ssh_user="${INPUT_SSH_USER:-root}"
+  local ssh_port="${INPUT_SSH_PORT:-22}"
+  local installer_url
+  local remote_command
+  local install_args
+  local ssh_args
+
+  [ -n "$ssh_host" ] || { error "ssh-host is required for command=install-console"; exit 1; }
+
+  case "$ssh_port" in
+    ''|*[!0-9]*)
+      error "ssh-port must be numeric for command=install-console"
+      exit 1
+      ;;
+  esac
+
+  validate_console_install_inputs
+
+  if [ -z "$console_url" ]; then
+    if [ -n "$console_domain" ]; then
+      console_url="https://${console_domain}"
+    else
+      console_url="http://${ssh_host}:${console_http_port}"
+    fi
+  fi
+  console_url="$(normalized_url "$console_url")"
+  installer_url="$(console_installer_url_for_version "$input_version")"
+
+  install_args="--version $(shell_quote "$input_version") --web-origin $(shell_quote "$console_url") --database $(shell_quote "$console_database") --host $(shell_quote "$console_http_host") --port $(shell_quote "$console_http_port") --image $(shell_quote "$console_image")"
+  if [ -n "$console_install_dir" ]; then
+    install_args="$install_args --home $(shell_quote "$console_install_dir")"
+  fi
+  if truthy "$console_skip_docker_install"; then
+    install_args="$install_args --skip-docker-install"
+  fi
+
+  if truthy "${APPALOFT_DEPLOY_ACTION_DRY_RUN:-false}"; then
+    if [ -n "${APPALOFT_DEPLOY_ACTION_ARGV_PATH:-}" ]; then
+      {
+        printf 'SSH %s@%s:%s\n' "$ssh_user" "$ssh_host" "$ssh_port"
+        printf 'INSTALLER %s\n' "$installer_url"
+        printf 'RUN sh /tmp/appaloft-install.sh %s\n' "$install_args"
+        printf 'HEALTH %s/api/health\n' "$console_url"
+      } > "$APPALOFT_DEPLOY_ACTION_ARGV_PATH"
+    else
+      printf 'SSH %s@%s:%s\n' "$ssh_user" "$ssh_host" "$ssh_port"
+      printf 'INSTALLER %s\n' "$installer_url"
+      printf 'RUN sh /tmp/appaloft-install.sh %s\n' "$install_args"
+      printf 'HEALTH %s/api/health\n' "$console_url"
+    fi
+    echo "console-url=$console_url" >> "${GITHUB_OUTPUT:-/dev/null}"
+    append_step_summary
+    return 0
+  fi
+
+  ssh_args=(-p "$ssh_port" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30)
+  if [ -n "$ssh_private_key_file" ]; then
+    ssh_args=(-i "$ssh_private_key_file" "${ssh_args[@]}")
+  fi
+
+  remote_command="if command -v curl >/dev/null 2>&1; then curl -fsSL $(shell_quote "$installer_url") -o /tmp/appaloft-install.sh; elif command -v wget >/dev/null 2>&1; then wget -qO /tmp/appaloft-install.sh $(shell_quote "$installer_url"); else echo 'curl or wget is required to download Appaloft installer' >&2; exit 1; fi; chmod 700 /tmp/appaloft-install.sh; sh /tmp/appaloft-install.sh $install_args"
+
+  ssh "${ssh_args[@]}" "$ssh_user@$ssh_host" "$remote_command"
+
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS "$console_url/api/health" >/dev/null; then
+      echo "console-url=$console_url" >> "${GITHUB_OUTPUT:-/dev/null}"
+      append_step_summary
+      return 0
+    fi
+    sleep 6
+  done
+
+  error "Appaloft console did not become healthy at $console_url/api/health"
+  exit 1
 }
 
 pull_request_number_from_context() {
@@ -509,6 +650,7 @@ trap cleanup_key_file EXIT
 
 appaloft_bin="${APPALOFT_BIN:-appaloft}"
 wrapper_command="${INPUT_COMMAND:-deploy}"
+input_version="${INPUT_VERSION:-latest}"
 source_locator="${INPUT_SOURCE:-.}"
 config_path="${INPUT_CONFIG:-}"
 input_control_plane_mode="${INPUT_CONTROL_PLANE_MODE:-}"
@@ -519,6 +661,14 @@ use_oidc="${INPUT_USE_OIDC:-false}"
 server_config_deploy="${INPUT_SERVER_CONFIG_DEPLOY:-false}"
 ssh_private_key="${INPUT_SSH_PRIVATE_KEY:-}"
 ssh_private_key_file="${INPUT_SSH_PRIVATE_KEY_FILE:-}"
+console_url="${INPUT_CONSOLE_URL:-}"
+console_domain="${INPUT_CONSOLE_DOMAIN:-}"
+console_database="${INPUT_CONSOLE_DATABASE:-pglite}"
+console_http_host="${INPUT_CONSOLE_HTTP_HOST:-0.0.0.0}"
+console_http_port="${INPUT_CONSOLE_HTTP_PORT:-3001}"
+console_install_dir="${INPUT_CONSOLE_INSTALL_DIR:-}"
+console_image="${INPUT_CONSOLE_IMAGE:-ghcr.io/appaloft/appaloft}"
+console_skip_docker_install="${INPUT_CONSOLE_SKIP_DOCKER_INSTALL:-false}"
 state_backend="${INPUT_STATE_BACKEND:-}"
 environment_variables="${INPUT_ENVIRONMENT_VARIABLES:-}"
 secret_variables="${INPUT_SECRET_VARIABLES:-}"
@@ -563,11 +713,30 @@ case "$wrapper_command" in
     ;;
   preview-cleanup)
     ;;
+  install-console)
+    ;;
   *)
     error "Unsupported deploy-action command: $wrapper_command"
     exit 1
     ;;
 esac
+
+if [ -n "$ssh_private_key" ] && [ -n "$ssh_private_key_file" ]; then
+  error "ssh-private-key and ssh-private-key-file are mutually exclusive"
+  exit 1
+fi
+
+if [ -n "$ssh_private_key" ]; then
+  generated_key_file="$(mktemp "${RUNNER_TEMP:-/tmp}/appaloft-ssh-key.XXXXXX")"
+  printf '%s\n' "$ssh_private_key" > "$generated_key_file"
+  chmod 600 "$generated_key_file"
+  ssh_private_key_file="$generated_key_file"
+fi
+
+if [ "$wrapper_command" = "install-console" ]; then
+  run_console_install
+  exit 0
+fi
 
 case "$control_plane_mode" in
   ""|none)
@@ -597,11 +766,6 @@ fi
 
 if truthy "$server_config_deploy" && { [ "$control_plane_mode" != "self-hosted" ] || [ "$wrapper_command" != "deploy" ]; }; then
   error "server-config-deploy requires control-plane-mode=self-hosted and command=deploy"
-  exit 1
-fi
-
-if [ -n "$ssh_private_key" ] && [ -n "$ssh_private_key_file" ]; then
-  error "ssh-private-key and ssh-private-key-file are mutually exclusive"
   exit 1
 fi
 
@@ -754,13 +918,6 @@ fi
 
 if [ -n "${INPUT_SSH_HOST:-}" ] && [ -z "$state_backend" ]; then
   state_backend="ssh-pglite"
-fi
-
-if [ -n "$ssh_private_key" ]; then
-  generated_key_file="$(mktemp "${RUNNER_TEMP:-/tmp}/appaloft-ssh-key.XXXXXX")"
-  printf '%s\n' "$ssh_private_key" > "$generated_key_file"
-  chmod 600 "$generated_key_file"
-  ssh_private_key_file="$generated_key_file"
 fi
 
 if [ -n "$preview" ] && [ "$wrapper_command" = "deploy" ]; then

@@ -3,11 +3,11 @@ description: Run an Appaloft deployment from GitHub Actions through pure SSH CLI
 
 inputs:
   command:
-    description: Wrapper command to run. Use deploy for deployments or preview-cleanup for pull request cleanup.
+    description: Wrapper command to run. Use deploy for deployments, preview-cleanup for pull request cleanup, or install-console to install or upgrade a self-hosted console over SSH.
     required: false
     default: deploy
   version:
-    description: Appaloft CLI release tag, for example v0.9.0. Use latest for the latest stable release.
+    description: Appaloft release tag, for example v0.9.0. Use latest for the latest stable release.
     required: false
     default: latest
   config:
@@ -42,6 +42,42 @@ inputs:
     description: Existing runner-local SSH private key file.
     required: false
     default: ""
+  console-url:
+    description: Public self-hosted console origin configured during command=install-console. Defaults to https://<console-domain> or http://<ssh-host>:<console-http-port>.
+    required: false
+    default: ""
+  console-domain:
+    description: Public self-hosted console domain used to derive https://<domain> when console-url is empty.
+    required: false
+    default: ""
+  console-database:
+    description: Self-hosted console database backend for command=install-console.
+    required: false
+    default: "pglite"
+  console-http-host:
+    description: Host bind address passed to the self-hosted console installer.
+    required: false
+    default: "0.0.0.0"
+  console-http-port:
+    description: Host HTTP port passed to the self-hosted console installer.
+    required: false
+    default: "3001"
+  console-install-dir:
+    description: Remote install directory passed to the self-hosted console installer. Defaults to the installer default.
+    required: false
+    default: ""
+  console-image:
+    description: Appaloft console image repository or full image reference passed to the self-hosted console installer.
+    required: false
+    default: "ghcr.io/appaloft/appaloft"
+  console-installer-url:
+    description: Override URL for the self-hosted install.sh script used by command=install-console.
+    required: false
+    default: ""
+  console-skip-docker-install:
+    description: Require Docker Engine to already exist on the SSH host when command=install-console.
+    required: false
+    default: "false"
   server-provider:
     description: Server provider key.
     required: false
@@ -169,7 +205,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/scripts/resolve-control-plane.sh"
 
     - id: install
-      if: ${{ steps.resolve.outputs.control-plane-mode == 'none' }}
+      if: ${{ steps.resolve.outputs.control-plane-mode == 'none' && inputs.command != 'install-console' }}
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
@@ -181,6 +217,7 @@ runs:
       env:
         APPALOFT_BIN: ${{ steps.install.outputs.appaloft-bin }}
         INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_VERSION: ${{ inputs.version }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_SOURCE: ${{ inputs.source }}
         INPUT_RUNTIME_NAME: ${{ inputs.runtime-name }}
@@ -189,6 +226,15 @@ runs:
         INPUT_SSH_PORT: ${{ inputs.ssh-port }}
         INPUT_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
         INPUT_SSH_PRIVATE_KEY_FILE: ${{ inputs.ssh-private-key-file }}
+        INPUT_CONSOLE_URL: ${{ inputs.console-url }}
+        INPUT_CONSOLE_DOMAIN: ${{ inputs.console-domain }}
+        INPUT_CONSOLE_DATABASE: ${{ inputs.console-database }}
+        INPUT_CONSOLE_HTTP_HOST: ${{ inputs.console-http-host }}
+        INPUT_CONSOLE_HTTP_PORT: ${{ inputs.console-http-port }}
+        INPUT_CONSOLE_INSTALL_DIR: ${{ inputs.console-install-dir }}
+        INPUT_CONSOLE_IMAGE: ${{ inputs.console-image }}
+        INPUT_CONSOLE_INSTALLER_URL: ${{ inputs.console-installer-url }}
+        INPUT_CONSOLE_SKIP_DOCKER_INSTALL: ${{ inputs.console-skip-docker-install }}
         INPUT_SERVER_PROVIDER: ${{ inputs.server-provider }}
         INPUT_SERVER_PROXY_KIND: ${{ inputs.server-proxy-kind }}
         INPUT_STATE_BACKEND: ${{ inputs.state-backend }}
