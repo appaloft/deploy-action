@@ -115,7 +115,7 @@ inputs:
     required: false
     default: ""
   environment-variables:
-    description: Newline-separated environment variables passed as repeated CLI --env values in pure CLI mode.
+    description: Newline-separated environment variables passed as repeated CLI --env values in pure CLI mode, or transient preview env values for server-config-deploy.
     required: false
     default: ""
   secret-variables:
@@ -171,23 +171,23 @@ inputs:
     required: false
     default: "false"
   project-id:
-    description: Trusted Appaloft project id for self-hosted server API mode.
+    description: Trusted Appaloft project id for self-hosted server API mode. Defaults to controlPlane.deploymentContext.projectId from config.
     required: false
     default: ""
   environment-id:
-    description: Trusted Appaloft environment id for self-hosted server API mode.
+    description: Trusted Appaloft environment id for self-hosted server API mode. Defaults to controlPlane.deploymentContext.environmentId from config.
     required: false
     default: ""
   resource-id:
-    description: Trusted Appaloft resource id for self-hosted server API mode.
+    description: Trusted Appaloft resource id for self-hosted server API mode. Defaults to controlPlane.deploymentContext.resourceId from config.
     required: false
     default: ""
   server-id:
-    description: Trusted Appaloft deployment target id for self-hosted server API mode.
+    description: Trusted Appaloft deployment target id for self-hosted server API mode. Defaults to controlPlane.deploymentContext.serverId from config.
     required: false
     default: ""
   destination-id:
-    description: Optional trusted Appaloft destination id for self-hosted server API mode.
+    description: Optional trusted Appaloft destination id for self-hosted server API mode. Defaults to controlPlane.deploymentContext.destinationId from config.
     required: false
     default: ""
 

@@ -225,6 +225,10 @@ read_control_plane_install_value() {
   read_config_path_value "$1" "controlPlane.install.$2"
 }
 
+read_control_plane_deployment_context_value() {
+  read_config_path_value "$1" "controlPlane.deploymentContext.$2"
+}
+
 read_source_value() {
   read_config_block_value "$1" source "$2"
 }
@@ -439,6 +443,53 @@ resolved_secrets_payload_for_action() {
   '
 }
 
+resolved_environment_payload_for_action() {
+  APPALOFT_ACTION_ENVIRONMENT_VARIABLES="$environment_variables" node -e '
+    const input = process.env.APPALOFT_ACTION_ENVIRONMENT_VARIABLES || "";
+    const environmentVariables = {};
+
+    function fail(message, details = {}) {
+      const suffix = Object.entries(details)
+        .filter(([, value]) => value)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(" ");
+      console.error(`::error::${message}${suffix ? ` (${suffix})` : ""}`);
+      process.exit(1);
+    }
+
+    for (const rawLine of input.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      const separatorIndex = line.indexOf("=");
+      if (separatorIndex <= 0) {
+        fail("server-config-deploy environment-variables must use KEY=value syntax");
+      }
+
+      const key = line.slice(0, separatorIndex).trim();
+      const value = line.slice(separatorIndex + 1);
+      if (!key) {
+        fail("server-config-deploy environment-variables must include a key");
+      }
+
+      environmentVariables[key] = value;
+    }
+
+    if (Object.keys(environmentVariables).length > 0) {
+      process.stdout.write(`,"environmentVariables":${JSON.stringify(environmentVariables)}`);
+    }
+  '
+}
+
+preview_route_payload_for_action() {
+  if [ -z "$preview_domain_template" ]; then
+    return 0
+  fi
+
+  local tls_mode="${preview_tls_mode:-disabled}"
+  printf ',"previewRoute":{"host":"%s","pathPrefix":"/","tlsMode":"%s"}' "$(json_escape "$preview_domain_template")" "$(json_escape "$tls_mode")"
+}
+
 post_json() {
   local endpoint="$1"
   local payload="$2"
@@ -462,6 +513,8 @@ source_package_payload_for_action() {
   local source_root="$3"
   local payload
   local resolved_secrets_payload
+  local resolved_environment_payload
+  local preview_route_payload
 
   payload="{\"sourceFingerprint\":\"$(json_escape "$source_fingerprint")\",\"configPath\":\"$(json_escape "$selected_config")\",\"sourceRoot\":\"$(json_escape "$source_root")\",\"sourcePackage\":{\"transport\":\"server-github-fetch\",\"sourceFingerprint\":\"$(json_escape "$source_fingerprint")\",\"configPath\":\"$(json_escape "$selected_config")\",\"sourceRoot\":\"$(json_escape "$source_root")\""
   if [ -n "${GITHUB_SHA:-}" ]; then
@@ -509,7 +562,13 @@ source_package_payload_for_action() {
   if ! resolved_secrets_payload="$(resolved_secrets_payload_for_action)"; then
     return 1
   fi
+  if ! resolved_environment_payload="$(resolved_environment_payload_for_action)"; then
+    return 1
+  fi
+  preview_route_payload="$(preview_route_payload_for_action)"
   payload="${payload}${resolved_secrets_payload}"
+  payload="${payload}${resolved_environment_payload}"
+  payload="${payload}${preview_route_payload}"
   payload="${payload}}"
   printf '%s' "$payload"
 }
@@ -927,6 +986,11 @@ if [ -n "$selected_config_path" ] && [ -f "$selected_config_path" ]; then
   config_console_image="$(read_control_plane_install_value "$selected_config_path" image)"
   config_console_installer_url="$(read_control_plane_install_value "$selected_config_path" installerUrl)"
   config_console_skip_docker_install="$(read_control_plane_install_value "$selected_config_path" skipDockerInstall)"
+  config_project_id="$(read_control_plane_deployment_context_value "$selected_config_path" projectId)"
+  config_environment_id="$(read_control_plane_deployment_context_value "$selected_config_path" environmentId)"
+  config_resource_id="$(read_control_plane_deployment_context_value "$selected_config_path" resourceId)"
+  config_server_id="$(read_control_plane_deployment_context_value "$selected_config_path" serverId)"
+  config_destination_id="$(read_control_plane_deployment_context_value "$selected_config_path" destinationId)"
 fi
 
 if [ -z "$control_plane_mode" ]; then
@@ -952,6 +1016,11 @@ console_swarm_advertise_addr="${console_swarm_advertise_addr:-${config_console_s
 console_image="${console_image:-${config_console_image:-ghcr.io/appaloft/appaloft}}"
 console_installer_url="${console_installer_url:-${config_console_installer_url:-}}"
 console_skip_docker_install="${console_skip_docker_install:-${config_console_skip_docker_install:-false}}"
+project_id="${project_id:-${config_project_id:-}}"
+environment_id="${environment_id:-${config_environment_id:-}}"
+resource_id="${resource_id:-${config_resource_id:-}}"
+server_id="${server_id:-${config_server_id:-}}"
+destination_id="${destination_id:-${config_destination_id:-}}"
 
 case "$wrapper_command" in
   ""|deploy)
@@ -1060,8 +1129,18 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
     exit 1
   fi
 
-  if truthy "$server_config_deploy" && { [ -n "${INPUT_RUNTIME_NAME:-}" ] || [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url" || [ -n "$environment_variables" ]; }; then
-    error "server-config-deploy hands source/config to the self-hosted server and does not accept runner-side profile, env, or preview route inputs"
+  if truthy "$server_config_deploy" && [ -n "${INPUT_RUNTIME_NAME:-}" ]; then
+    error "server-config-deploy hands source/config to the self-hosted server and does not accept runner-side runtime/profile inputs"
+    exit 1
+  fi
+
+  if truthy "$server_config_deploy" && { [ -n "$preview_domain_template" ] || [ -n "$preview_tls_mode" ] || truthy "$require_preview_url"; } && [ "$preview" != "pull-request" ]; then
+    error "server-config-deploy preview route inputs require preview=pull-request"
+    exit 1
+  fi
+
+  if truthy "$server_config_deploy" && truthy "$require_preview_url" && [ -z "$preview_domain_template" ]; then
+    error "server-config-deploy require-preview-url requires preview-domain-template"
     exit 1
   fi
 
@@ -1155,6 +1234,15 @@ if [ "$control_plane_mode" = "self-hosted" ]; then
 
   if [ -n "$preview_id" ]; then
     echo "preview-id=$preview_id" >> "${GITHUB_OUTPUT:-/dev/null}"
+  fi
+  preview_url=""
+  if truthy "$server_config_deploy" && [ -n "$preview_domain_template" ]; then
+    if [ "$preview_tls_mode" = "disabled" ]; then
+      preview_url="http://${preview_domain_template}"
+    else
+      preview_url="https://${preview_domain_template}"
+    fi
+    echo "preview-url=$preview_url" >> "${GITHUB_OUTPUT:-/dev/null}"
   fi
   echo "console-url=$control_plane_url" >> "${GITHUB_OUTPUT:-/dev/null}"
   append_step_summary
