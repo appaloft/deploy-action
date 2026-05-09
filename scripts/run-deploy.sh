@@ -539,6 +539,9 @@ append_step_summary() {
     if [ "$wrapper_command" = "install-console" ] && [ -n "${console_database:-}" ]; then
       printf -- '- Database: `%s`\n' "$console_database"
     fi
+    if [ "$wrapper_command" = "install-console" ] && [ -n "${console_proxy:-}" ]; then
+      printf -- '- Proxy: `%s`\n' "$console_proxy"
+    fi
     if [ -n "${deployment_id:-}" ]; then
       if [ -n "${deployment_url:-}" ]; then
         printf -- '- Deployment: [%s](%s)\n' "$deployment_id" "$deployment_url"
@@ -592,6 +595,15 @@ validate_console_install_inputs() {
       ;;
   esac
 
+  case "$console_proxy" in
+    traefik|none)
+      ;;
+    *)
+      error "console-proxy must be traefik or none"
+      exit 1
+      ;;
+  esac
+
   case "$console_http_port" in
     ''|*[!0-9]*)
       error "console-http-port must be a positive integer"
@@ -637,6 +649,12 @@ run_console_install() {
   installer_url="$(console_installer_url_for_version "$input_version")"
 
   install_args="--version $(shell_quote "$input_version") --web-origin $(shell_quote "$console_url") --database $(shell_quote "$console_database") --orchestrator $(shell_quote "$console_orchestrator") --host $(shell_quote "$console_http_host") --port $(shell_quote "$console_http_port") --image $(shell_quote "$console_image")"
+  if [ -n "$console_domain" ]; then
+    install_args="$install_args --domain $(shell_quote "$console_domain")"
+  fi
+  if [ -n "$console_proxy" ]; then
+    install_args="$install_args --proxy $(shell_quote "$console_proxy")"
+  fi
   if [ -n "$console_install_dir" ]; then
     install_args="$install_args --home $(shell_quote "$console_install_dir")"
   fi
@@ -851,6 +869,7 @@ console_url="${INPUT_CONSOLE_URL:-}"
 console_domain="${INPUT_CONSOLE_DOMAIN:-}"
 console_database="${INPUT_CONSOLE_DATABASE:-}"
 console_orchestrator="${INPUT_CONSOLE_ORCHESTRATOR:-}"
+console_proxy="${INPUT_CONSOLE_PROXY:-}"
 console_http_host="${INPUT_CONSOLE_HTTP_HOST:-}"
 console_http_port="${INPUT_CONSOLE_HTTP_PORT:-}"
 console_install_dir="${INPUT_CONSOLE_INSTALL_DIR:-}"
@@ -897,6 +916,7 @@ if [ -n "$selected_config_path" ] && [ -f "$selected_config_path" ]; then
   config_console_domain="$(read_control_plane_install_value "$selected_config_path" domain)"
   config_console_database="$(read_control_plane_install_value "$selected_config_path" database)"
   config_console_orchestrator="$(read_control_plane_install_value "$selected_config_path" orchestrator)"
+  config_console_proxy="$(read_control_plane_install_value "$selected_config_path" proxy)"
   config_console_http_host="$(read_control_plane_install_value "$selected_config_path" httpHost)"
   config_console_http_port="$(read_control_plane_install_value "$selected_config_path" httpPort)"
   config_console_install_dir="$(read_control_plane_install_value "$selected_config_path" installDir)"
@@ -919,10 +939,11 @@ fi
 if [ -z "$console_domain" ]; then
   console_domain="${config_console_domain:-}"
 fi
-console_database="${console_database:-${config_console_database:-pglite}}"
+console_database="${console_database:-${config_console_database:-postgres}}"
 console_orchestrator="${console_orchestrator:-${config_console_orchestrator:-compose}}"
+console_proxy="${console_proxy:-${config_console_proxy:-traefik}}"
 console_http_host="${console_http_host:-${config_console_http_host:-0.0.0.0}}"
-console_http_port="${console_http_port:-${config_console_http_port:-3001}}"
+console_http_port="${console_http_port:-${config_console_http_port:-3721}}"
 console_install_dir="${console_install_dir:-${config_console_install_dir:-}}"
 console_compose_project_name="${console_compose_project_name:-${config_console_compose_project_name:-appaloft}}"
 console_swarm_stack_name="${console_swarm_stack_name:-${config_console_swarm_stack_name:-appaloft}}"

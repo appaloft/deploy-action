@@ -51,11 +51,15 @@ inputs:
     required: false
     default: ""
   console-database:
-    description: Self-hosted console database backend for command=install-console. Defaults to controlPlane.install.database or pglite.
+    description: Self-hosted console database backend for command=install-console. Defaults to controlPlane.install.database or postgres.
     required: false
     default: ""
   console-orchestrator:
     description: Self-hosted console Docker orchestrator for command=install-console. Defaults to controlPlane.install.orchestrator or compose.
+    required: false
+    default: ""
+  console-proxy:
+    description: Managed self-hosted proxy for command=install-console. Defaults to controlPlane.install.proxy or traefik.
     required: false
     default: ""
   console-http-host:
@@ -63,7 +67,7 @@ inputs:
     required: false
     default: ""
   console-http-port:
-    description: Host HTTP port passed to the self-hosted console installer. Defaults to controlPlane.install.httpPort or 3001.
+    description: Host HTTP port passed to the self-hosted console installer. Defaults to controlPlane.install.httpPort or 3721.
     required: false
     default: ""
   console-install-dir:
@@ -250,6 +254,7 @@ runs:
         INPUT_CONSOLE_DOMAIN: ${{ inputs.console-domain }}
         INPUT_CONSOLE_DATABASE: ${{ inputs.console-database }}
         INPUT_CONSOLE_ORCHESTRATOR: ${{ inputs.console-orchestrator }}
+        INPUT_CONSOLE_PROXY: ${{ inputs.console-proxy }}
         INPUT_CONSOLE_HTTP_HOST: ${{ inputs.console-http-host }}
         INPUT_CONSOLE_HTTP_PORT: ${{ inputs.console-http-port }}
         INPUT_CONSOLE_INSTALL_DIR: ${{ inputs.console-install-dir }}
