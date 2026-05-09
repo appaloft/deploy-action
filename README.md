@@ -86,18 +86,22 @@ jobs:
           ssh-user: ${{ secrets.APPALOFT_CONSOLE_SSH_USER }}
           ssh-private-key: ${{ secrets.APPALOFT_CONSOLE_SSH_PRIVATE_KEY }}
           console-domain: console.example.com
-          console-database: pglite
+          console-database: postgres
+          console-proxy: traefik
           console-orchestrator: compose
           console-skip-docker-install: true
 ```
 
 The action connects to the SSH host, downloads the matching Appaloft release `install.sh`, runs the
 self-hosted Docker installer with the selected public console origin and Docker orchestrator, and
-verifies `/api/health`. `console-url` may be supplied directly when the public origin is not
-`https://<console-domain>`. Set `console-orchestrator: swarm` to deploy the console as a Docker
+verifies `/api/health`. The installer defaults to PostgreSQL, direct host access on port `3721`,
+and an Appaloft-managed Traefik edge proxy. `console-domain` is passed to the installer as the
+Appaloft instance console route. `console-url` may be supplied directly when the public origin is
+not `https://<console-domain>`. Set `console-orchestrator: swarm` to deploy the console as a Docker
 Swarm stack; `console-swarm-init: true` may initialize a single-node Swarm manager when the host is
-not already a manager. This command is separate from `deploy`, so the original pure SSH CLI
-deployment path remains available.
+not already a manager. Use `console-proxy: none` only when another reverse proxy owns public
+routing. This command is separate from `deploy`, so the original pure SSH CLI deployment path
+remains available.
 
 Non-secret console install settings can live in the selected config file. SSH host, SSH key, API
 tokens, and raw database credentials still come from trusted workflow inputs or secrets.
@@ -107,9 +111,11 @@ controlPlane:
   mode: self-hosted
   url: https://console.example.com
   install:
-    database: pglite
+    database: postgres
+    domain: console.example.com
+    proxy: traefik
     orchestrator: swarm
-    httpPort: 3001
+    httpPort: 3721
     swarmStackName: appaloft-console
     swarmInit: true
 ```
@@ -365,10 +371,11 @@ source-link state, or the Appaloft server, not from committed config.
 | `ssh-private-key-file` | empty | Existing runner-local private key path. Mutually exclusive with `ssh-private-key`. |
 | `console-url` | empty | Public console origin for `command: install-console`. Defaults to `https://<console-domain>` or `http://<ssh-host>:<console-http-port>`. |
 | `console-domain` | empty | Public console domain used to derive `console-url` when `console-url` is empty. |
-| `console-database` | config or `pglite` | Self-hosted console database backend for `command: install-console`; `pglite` or `postgres`. |
+| `console-database` | config or `postgres` | Self-hosted console database backend for `command: install-console`; `pglite` or `postgres`. |
 | `console-orchestrator` | config or `compose` | Self-hosted Docker orchestrator for `command: install-console`; `compose` or `swarm`. |
+| `console-proxy` | config or `traefik` | Self-hosted console proxy mode for `command: install-console`; `traefik` or `none`. |
 | `console-http-host` | config or `0.0.0.0` | Host bind address passed to the self-hosted console installer. |
-| `console-http-port` | config or `3001` | Host HTTP port passed to the self-hosted console installer. |
+| `console-http-port` | config or `3721` | Host HTTP port passed to the self-hosted console installer. |
 | `console-install-dir` | empty | Remote install directory passed to the self-hosted console installer. Empty uses the installer default. |
 | `console-compose-project-name` | config or `appaloft` | Docker Compose project name passed to the self-hosted console installer. |
 | `console-swarm-stack-name` | config or `appaloft` | Docker Swarm stack name passed to the self-hosted console installer. |
